@@ -4,8 +4,12 @@ import dataclasses
 from unittest.mock import patch
 
 import pytest
-
-from spurtle.operations.config import get_config, list_config_keys, set_config, update_config
+from spurtle.operations.config import (
+    get_config,
+    list_config_keys,
+    set_config,
+    update_config,
+)
 from spurtle.operations.schema import ConfigKeyInfo
 
 
@@ -15,7 +19,7 @@ class TestGetConfig:
     @staticmethod
     def test_returns_resolved_config() -> None:
         """get_config returns the result of resolve_config()."""
-        with patch('spurtle.operations.config.resolve_config') as mock:
+        with patch("spurtle.operations.config.resolve_config") as mock:
             sentinel = object()
             mock.return_value = sentinel
             assert get_config() is sentinel
@@ -27,13 +31,13 @@ class TestSetConfig:
     @staticmethod
     def test_unknown_key_raises() -> None:
         """Raises KeyError for an invalid config key."""
-        with pytest.raises(KeyError, match='Unknown config key'):
-            set_config('nonexistent_key_xyz', 'value')
+        with pytest.raises(KeyError, match="Unknown config key"):
+            set_config("nonexistent_key_xyz", "value")
 
     @staticmethod
     def test_delegates_to_update_user_config() -> None:
         """Calls update_user_config with the correct kwargs."""
-        with patch('spurtle.operations.config.update_user_config') as mock:
+        with patch("spurtle.operations.config.update_user_config") as mock:
             mock_config = object()
             mock.return_value = mock_config
             # Use a known field from ResolvedConfig
@@ -42,8 +46,8 @@ class TestSetConfig:
             field_names = [f.name for f in dataclasses.fields(ResolvedConfig)]
             if field_names:
                 key = field_names[0]
-                result = set_config(key, 'test_value')
-                mock.assert_called_once_with(**{key: 'test_value'})
+                result = set_config(key, "test_value")
+                mock.assert_called_once_with(**{key: "test_value"})
                 assert result is mock_config
 
 
@@ -55,13 +59,14 @@ class TestListConfigKeys:
         """Returns a ConfigKeyInfo entry for each ResolvedConfig field."""
         from spurtle.schema import ResolvedConfig
 
-        with patch('spurtle.operations.config.resolve_config') as mock:
+        with patch("spurtle.operations.config.resolve_config") as mock:
             mock.return_value = ResolvedConfig(
                 update_source=None,
-                update_channel='stable',
+                update_channel="stable",
                 auto_update_interval_minutes=60,
                 tool_update_interval_minutes=60,
                 plugin_auto_update=None,
+                entry_auto_update=None,
                 prerelease_packages=None,
                 auto_apply=False,
                 auto_start=False,
@@ -83,13 +88,13 @@ class TestUpdateConfig:
     @staticmethod
     def test_unknown_key_raises() -> None:
         """Raises KeyError for an invalid config key."""
-        with pytest.raises(KeyError, match='Unknown config key'):
-            update_config(nonexistent_key_xyz='value')
+        with pytest.raises(KeyError, match="Unknown config key"):
+            update_config(nonexistent_key_xyz="value")
 
     @staticmethod
     def test_delegates_to_update_user_config() -> None:
         """Calls update_user_config with all provided kwargs."""
-        with patch('spurtle.operations.config.update_user_config') as mock:
+        with patch("spurtle.operations.config.update_user_config") as mock:
             mock_config = object()
             mock.return_value = mock_config
             from spurtle.schema import ResolvedConfig
@@ -98,8 +103,8 @@ class TestUpdateConfig:
             min_fields = 2
             if len(field_names) >= min_fields:
                 key1, key2 = field_names[0], field_names[1]
-                result = update_config(**{key1: 'a', key2: 'b'})
-                mock.assert_called_once_with(**{key1: 'a', key2: 'b'})
+                result = update_config(**{key1: "a", key2: "b"})
+                mock.assert_called_once_with(**{key1: "a", key2: "b"})
                 assert result is mock_config
 
     @staticmethod
@@ -109,5 +114,5 @@ class TestUpdateConfig:
 
         field_names = [f.name for f in dataclasses.fields(ResolvedConfig)]
         if field_names:
-            with pytest.raises(KeyError, match='Unknown config key'):
-                update_config(**{field_names[0]: 'ok', 'bad_key_xyz': 'nope'})
+            with pytest.raises(KeyError, match="Unknown config key"):
+                update_config(**{field_names[0]: "ok", "bad_key_xyz": "nope"})

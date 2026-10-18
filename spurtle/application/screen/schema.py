@@ -14,17 +14,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from porringer.schema import (
+    ActionProgress,
     PluginCapability,
     PluginInfo,
     SetupAction,
     SetupActionResult,
     SetupResults,
-    SubActionProgress,
-    SyncStrategy,
+    SyncPlan,
 )
-from porringer.schema.plugin import RuntimePackageResult
 
 from spurtle.application.uri import normalize_manifest_key
+from spurtle.operations.inventory import ToolInventory, ToolRow
 from spurtle.operations.schema import InstallPlan
 
 # ---------------------------------------------------------------------------
@@ -43,16 +43,16 @@ class PackageEntry:
     name: str
     """Package name (e.g. ``"pdm"``, ``"ruff"``)."""
 
-    project_label: str = ''
+    project_label: str = ""
     """Human-readable project directory label, or empty for global packages."""
 
-    version: str = ''
+    version: str = ""
     """Installed version string, or empty if unknown."""
 
-    host_tool: str = ''
+    host_tool: str = ""
     """Name of the host package when injected (e.g. ``"pdm"``), otherwise empty."""
 
-    project_path: str = ''
+    project_path: str = ""
     """Directory path string for project-scoped packages, or empty for global ones."""
 
 
@@ -71,7 +71,7 @@ class ProjectInstance:
     project_path: str
     """Filesystem path of the project directory."""
 
-    version: str = ''
+    version: str = ""
     """Installed version string in this project."""
 
     is_transitive: bool = False
@@ -97,7 +97,7 @@ class DisplayPackage:
     is_global: bool = False
     """``True`` when the package is installed globally."""
 
-    host_tool: str = ''
+    host_tool: str = ""
     """Host-tool annotation for injected packages."""
 
     project_instances: list[ProjectInstance] = field(default_factory=list)
@@ -115,13 +115,13 @@ class PluginRowData:
     name: str
     """Package or tool name."""
 
-    project: str = ''
+    project: str = ""
     """Comma-separated project labels, or empty for global / bare rows."""
 
-    version: str = ''
+    version: str = ""
     """Installed version string."""
 
-    plugin_name: str = ''
+    plugin_name: str = ""
     """Name of the managing plugin (e.g. ``"pipx"``)."""
 
     auto_update: bool = False
@@ -136,10 +136,10 @@ class PluginRowData:
     is_global: bool = False
     """``True`` when the package is globally installed."""
 
-    host_tool: str = ''
+    host_tool: str = ""
     """Host-tool name for injected packages."""
 
-    runtime_tag: str = ''
+    runtime_tag: str = ""
     """Runtime tag for per-runtime packages (e.g. ``\"3.12\"``)."""
 
     project_paths: list[str] = field(default_factory=list)
@@ -148,8 +148,11 @@ class PluginRowData:
     project_instances: list[ProjectInstance] = field(default_factory=list)
     """Project-scoped occurrences of this package, displayed as inline tags."""
 
-    last_updated: str = ''
+    last_updated: str = ""
     """ISO 8601 timestamp of the last successful update, or empty."""
+
+    tool_row: ToolRow | None = None
+    """The inventory row behind this widget; its state decides which actions are offered."""
 
 
 @dataclass(slots=True)
@@ -165,11 +168,11 @@ class RefreshData:
     manifest_packages: dict[str, set[str]]
     """Mapping of plugin name → manifest-referenced package names."""
 
-    runtime_packages: dict[str, list[RuntimePackageResult]] = field(default_factory=dict)
-    """Mapping of plugin name → per-runtime package results (RuntimeConsumer plugins only)."""
+    available: dict[str, dict[str, str]] = field(default_factory=dict)
+    """Mapping of plugin name → ``{package_name: latest_version}`` with updates."""
 
-    default_runtime_executable: Path | None = None
-    """Executable path of the resolved default runtime, if any."""
+    inventory: ToolInventory | None = None
+    """Installed packages, runtimes and their manifest state, when built from the inventory."""
 
 
 # ---------------------------------------------------------------------------
@@ -186,25 +189,25 @@ class PreviewPhase(enum.Enum):
     ``_installing`` boolean flag and status-label-text-based implicit state.
     """
 
-    IDLE = 'idle'
+    IDLE = "idle"
     """No preview loaded."""
 
-    LOADING = 'loading'
+    LOADING = "loading"
     """Skeleton placeholders displayed; preview worker running."""
 
-    PREVIEWING = 'previewing'
+    PREVIEWING = "previewing"
     """Cards populated; dry-run status checks in progress."""
 
-    READY = 'ready'
+    READY = "ready"
     """Dry-run complete; install button may be enabled."""
 
-    INSTALLING = 'installing'
+    INSTALLING = "installing"
     """Install worker running."""
 
-    DONE = 'done'
+    DONE = "done"
     """Install finished; execution logs visible."""
 
-    ERROR = 'error'
+    ERROR = "error"
     """Preview or install failed."""
 
 
@@ -220,7 +223,7 @@ class ActionState:
     action: SetupAction
     """The porringer setup action."""
 
-    status: str = 'Checking\u2026'
+    status: str = "Checking\u2026"
     """Human-readable dry-run status label."""
 
     log_lines: list[tuple[str, str | None]] = field(default_factory=list)
@@ -250,13 +253,13 @@ class PreviewModel:
         self._action_state_map: dict[SetupAction, ActionState] = {}
         self._action_state_map_len: int = 0
         self.install_plan: InstallPlan | None = None
+        self.plan: SyncPlan | None = None
+        """The previewed Porringer plan; an install runs exactly this."""
+        self.previewed_project_directory: Path | None = None
+        """The project directory :attr:`plan` was made for."""
         self.checked_count: int = 0
         self.completed_count: int = 0
         self.temp_dir: str | None = None
-
-        # Post-sync tracking (independent from install)
-        self.post_sync_completed: bool = False
-        self.post_sync_results: list[SetupActionResult] | None = None
 
     # -- Computed helpers --------------------------------------------------
 
@@ -280,29 +283,16 @@ class PreviewModel:
             return self.install_plan.install_enabled
         return False
 
-    @property
-    def has_post_sync(self) -> bool:
-        """Whether the manifest has post-sync commands."""
-        if self.install_plan is not None:
-            return self.install_plan.has_post_sync
-        return False
-
     def action_state_for(self, act: SetupAction) -> ActionState | None:
         """Look up :class:`ActionState` for *act* (O(1) amortized)."""
         return self._ensure_action_state_map().get(act)
 
     def has_same_manifest(self, key: str) -> bool:
         """Return ``True`` if *key* matches the current manifest key."""
-        return self.manifest_key is not None and self.manifest_key == normalize_manifest_key(key)
-
-
-@dataclass(frozen=True, slots=True)
-class InstallConfig:
-    """Optional execution parameters for the install worker."""
-
-    project_directory: Path | None = None
-    strategy: SyncStrategy = SyncStrategy.MINIMAL
-    prerelease_packages: set[str] | None = field(default=None)
+        return (
+            self.manifest_key is not None
+            and self.manifest_key == normalize_manifest_key(key)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,7 +302,7 @@ class InstallCallbacks:
     on_action_started: Callable[[SetupAction], None] | None = None
     """Called when an action begins execution."""
 
-    on_sub_progress: Callable[[SetupAction, SubActionProgress], None] | None = None
+    on_sub_progress: Callable[[SetupAction, ActionProgress], None] | None = None
     """Called for sub-action progress events."""
 
     on_progress: Callable[[SetupAction, SetupActionResult], None] | None = None
@@ -344,5 +334,5 @@ class UpdateTarget:
     plugin: str
     """Signal key for the plugin (may be composite ``"name:tag"``)."""
 
-    package: str = ''
+    package: str = ""
     """Package name, or empty when the whole plugin was updated."""

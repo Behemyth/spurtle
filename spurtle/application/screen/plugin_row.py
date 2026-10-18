@@ -67,10 +67,10 @@ from spurtle.application.theme import (
 class RowPhase(Enum):
     """Mutually exclusive visual state for a :class:`PluginRow`."""
 
-    IDLE = 'idle'
-    CHECKING = 'checking'
-    PENDING = 'pending'
-    UPDATING = 'updating'
+    IDLE = "idle"
+    CHECKING = "checking"
+    PENDING = "pending"
+    UPDATING = "updating"
 
 
 # Row-spinner dimensions
@@ -86,7 +86,9 @@ class _RowSpinner(SpinnerCanvas):
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(size=_ROW_SPINNER_SIZE, pen_width=_ROW_SPINNER_PEN, parent=parent)
+        super().__init__(
+            size=_ROW_SPINNER_SIZE, pen_width=_ROW_SPINNER_PEN, parent=parent
+        )
         self._timer = QTimer(self)
         self._timer.setInterval(50)
         self._timer.timeout.connect(self.tick)
@@ -119,7 +121,7 @@ class PluginKindHeader(QLabel):
     def __init__(self, kind: PluginKind, parent: QWidget | None = None) -> None:
         """Initialize the kind header with an uppercase label."""
         super().__init__(plugin_kind_group_label(kind).upper(), parent)
-        self.setObjectName('pluginKindHeader')
+        self.setObjectName("pluginKindHeader")
         self.setStyleSheet(PLUGIN_KIND_HEADER_STYLE)
 
 
@@ -157,10 +159,10 @@ class PluginProviderHeader(QFrame):
     ) -> None:
         """Initialize the provider header with plugin info and optional controls."""
         super().__init__(parent)
-        self.setObjectName('pluginProvider')
+        self.setObjectName("pluginProvider")
         self.setStyleSheet(PLUGIN_PROVIDER_STYLE)
         self._plugin_name = plugin.name
-        self._runtime_tag = ''
+        self._runtime_tag = ""
         self._signal_key = plugin.name
         self._update_btn: QPushButton | None = None
         self._check_btn: QPushButton | None = None
@@ -179,23 +181,28 @@ class PluginProviderHeader(QFrame):
         version_text = (
             str(plugin.tool_version)
             if plugin.tool_version is not None
-            else 'Installed'
+            else "Installed"
             if plugin.installed
-            else 'Not installed'
+            else "Not installed"
         )
         version_label = QLabel(version_text)
         version_label.setStyleSheet(PLUGIN_PROVIDER_VERSION_STYLE)
         self._layout.addWidget(version_label)
 
         # Installed indicator
-        status_label = QLabel('\u25cf' if plugin.installed else '\u25cb')
+        status_label = QLabel("\u25cf" if plugin.installed else "\u25cb")
         status_label.setStyleSheet(
-            PLUGIN_PROVIDER_STATUS_INSTALLED_STYLE if plugin.installed else PLUGIN_PROVIDER_STATUS_MISSING_STYLE
+            PLUGIN_PROVIDER_STATUS_INSTALLED_STYLE
+            if plugin.installed
+            else PLUGIN_PROVIDER_STATUS_MISSING_STYLE
         )
-        base_tip = 'Installed' if plugin.installed else 'Not installed'
+        base_tip = "Installed" if plugin.installed else "Not installed"
         if capabilities:
-            cap_names = ', '.join(c.name.replace('_', ' ').title() for c in sorted(capabilities, key=lambda c: c.name))
-            status_label.setToolTip(f'{base_tip} \u00b7 {cap_names}')
+            cap_names = ", ".join(
+                c.name.replace("_", " ").title()
+                for c in sorted(capabilities, key=lambda c: c.name)
+            )
+            status_label.setToolTip(f"{base_tip} \u00b7 {cap_names}")
         else:
             status_label.setToolTip(base_tip)
         self._layout.addWidget(status_label)
@@ -212,18 +219,20 @@ class PluginProviderHeader(QFrame):
         if show_controls:
             self._build_controls(self._layout, plugin, auto_update, has_updates)
 
-    def set_runtime(self, tag: str, label: str = '') -> None:
+    def set_runtime(self, tag: str, label: str = "") -> None:
         """Set runtime identity and optionally insert a runtime tag pill.
 
         Must be called before the widget is added to a visible layout.
         """
         self._runtime_tag = tag
-        self._signal_key = f'{self._plugin_name}:{tag}' if tag else self._plugin_name
+        self._signal_key = f"{self._plugin_name}:{tag}" if tag else self._plugin_name
         if label:
-            is_default = '(default)' in label
+            is_default = "(default)" in label
             pill = QLabel(label)
             pill.setStyleSheet(
-                PLUGIN_PROVIDER_RUNTIME_TAG_DEFAULT_STYLE if is_default else PLUGIN_PROVIDER_RUNTIME_TAG_STYLE
+                PLUGIN_PROVIDER_RUNTIME_TAG_DEFAULT_STYLE
+                if is_default
+                else PLUGIN_PROVIDER_RUNTIME_TAG_STYLE
             )
             # Insert after the name label (index 1)
             self._layout.insertWidget(1, pill)
@@ -236,19 +245,19 @@ class PluginProviderHeader(QFrame):
         has_updates: bool,
     ) -> None:
         """Build auto-update toggle, check, and Update control buttons."""
-        toggle_btn = QPushButton('\u21ba')
+        toggle_btn = QPushButton("\u21ba")
         toggle_btn.setCheckable(True)
         toggle_btn.setChecked(auto_update)
         toggle_btn.setStyleSheet(PLUGIN_TOGGLE_STYLE)
-        toggle_btn.setToolTip('Enable automatic updates for this plugin')
+        toggle_btn.setToolTip("Enable automatic updates for this plugin")
         toggle_btn.clicked.connect(
             lambda checked: self.auto_update_toggled.emit(self._signal_key, checked),
         )
         layout.addWidget(toggle_btn)
 
-        check_btn = QPushButton('\u27f3')
+        check_btn = QPushButton("\u27f3")
         check_btn.setStyleSheet(PLUGIN_CHECK_STYLE)
-        check_btn.setToolTip('Check for updates now')
+        check_btn.setToolTip("Check for updates now")
         check_btn.clicked.connect(
             lambda: self.check_requested.emit(self._signal_key),
         )
@@ -258,9 +267,9 @@ class PluginProviderHeader(QFrame):
         self._checking_spinner = _RowSpinner(self)
         layout.addWidget(self._checking_spinner)
 
-        update_btn = QPushButton('Update')
+        update_btn = QPushButton("Update")
         update_btn.setStyleSheet(PLUGIN_UPDATE_STYLE)
-        update_btn.setToolTip(f'Upgrade packages via {plugin.name} now')
+        update_btn.setToolTip(f"Upgrade packages via {plugin.name} now")
         update_btn.clicked.connect(
             lambda: self.update_requested.emit(self._signal_key),
         )
@@ -271,11 +280,11 @@ class PluginProviderHeader(QFrame):
         if not plugin.installed:
             toggle_btn.setEnabled(False)
             toggle_btn.setChecked(False)
-            toggle_btn.setToolTip('Not installed \u2014 cannot auto-update')
+            toggle_btn.setToolTip("Not installed \u2014 cannot auto-update")
             check_btn.setEnabled(False)
-            check_btn.setToolTip('Not installed \u2014 cannot check for updates')
+            check_btn.setToolTip("Not installed \u2014 cannot check for updates")
             update_btn.setEnabled(False)
-            update_btn.setToolTip('Not installed \u2014 cannot update')
+            update_btn.setToolTip("Not installed \u2014 cannot update")
 
     def set_updating(self, updating: bool) -> None:
         """Toggle between *Updating…* (with spinner) and *Update* states."""
@@ -288,7 +297,7 @@ class PluginProviderHeader(QFrame):
             if self._checking_spinner is not None:
                 self._checking_spinner.stop()
             if self._update_btn is not None:
-                self._update_btn.setText('Update')
+                self._update_btn.setText("Update")
                 self._update_btn.setEnabled(True)
 
     def set_checking(self, checking: bool) -> None:
@@ -359,18 +368,24 @@ class PluginRow(QFrame):
     ) -> None:
         """Initialize a plugin row from bundled display data."""
         super().__init__(parent)
-        self.setObjectName('pluginRow')
+        self.setObjectName("pluginRow")
         self.setStyleSheet(PLUGIN_ROW_STYLE)
         self._plugin_name = data.plugin_name
         self._package_name = data.name
         self._runtime_tag = data.runtime_tag
-        self._signal_key = f'{data.plugin_name}:{data.runtime_tag}' if data.runtime_tag else data.plugin_name
+        self._signal_key = (
+            f"{data.plugin_name}:{data.runtime_tag}"
+            if data.runtime_tag
+            else data.plugin_name
+        )
         self._update_btn: QPushButton | None = None
         self._remove_btn: QPushButton | None = None
         self._row_spinner: _RowSpinner | None = None
         self._host_label: QLabel | None = None
         self._project_paths: list[str] = list(data.project_paths)
-        self._project_labels: list[str] = [p.project_label for p in data.project_instances]
+        self._project_labels: list[str] = [
+            p.project_label for p in data.project_instances
+        ]
         self._update_status_label: QLabel | None = None
         self._timestamp_label: QLabel | None = None
 
@@ -391,7 +406,7 @@ class PluginRow(QFrame):
         layout.addWidget(name_label)
 
         if data.host_tool:
-            self._host_label = QLabel(f'\u2192 {data.host_tool}')
+            self._host_label = QLabel(f"\u2192 {data.host_tool}")
             self._host_label.setStyleSheet(PLUGIN_ROW_HOST_STYLE)
             layout.addWidget(self._host_label)
 
@@ -399,16 +414,23 @@ class PluginRow(QFrame):
         if data.project_instances:
             for proj in data.project_instances:
                 tag = QLabel(proj.project_label)
-                style = PLUGIN_ROW_PROJECT_TAG_TRANSITIVE_STYLE if proj.is_transitive else PLUGIN_ROW_PROJECT_TAG_STYLE
+                style = (
+                    PLUGIN_ROW_PROJECT_TAG_TRANSITIVE_STYLE
+                    if proj.is_transitive
+                    else PLUGIN_ROW_PROJECT_TAG_STYLE
+                )
                 tag.setStyleSheet(style)
-                tag.setToolTip(f'{proj.project_path}' + (' (transitive)' if proj.is_transitive else ''))
+                tag.setToolTip(
+                    f"{proj.project_path}"
+                    + (" (transitive)" if proj.is_transitive else "")
+                )
                 layout.addWidget(tag)
         elif data.project:
             project_label = QLabel(data.project)
             project_label.setStyleSheet(PLUGIN_ROW_PROJECT_STYLE)
             layout.addWidget(project_label)
         elif data.is_global:
-            global_label = QLabel('(global)')
+            global_label = QLabel("(global)")
             global_label.setStyleSheet(PLUGIN_ROW_GLOBAL_STYLE)
             layout.addWidget(global_label)
 
@@ -442,15 +464,19 @@ class PluginRow(QFrame):
         version_label = QLabel(data.version)
         version_label.setStyleSheet(PLUGIN_ROW_VERSION_STYLE)
         version_label.setMinimumWidth(PLUGIN_ROW_VERSION_MIN_WIDTH)
-        version_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        version_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         layout.addWidget(version_label)
 
         # Timestamp — always created so column width is reserved
-        self._timestamp_label = QLabel(_format_relative_time(data.last_updated) if data.last_updated else '')
+        self._timestamp_label = QLabel(
+            _format_relative_time(data.last_updated) if data.last_updated else ""
+        )
         self._timestamp_label.setStyleSheet(PLUGIN_ROW_TIMESTAMP_STYLE)
         self._timestamp_label.setMinimumWidth(PLUGIN_ROW_TIMESTAMP_MIN_WIDTH)
         if data.last_updated:
-            self._timestamp_label.setToolTip(f'Last updated: {data.last_updated}')
+            self._timestamp_label.setToolTip(f"Last updated: {data.last_updated}")
         layout.addWidget(self._timestamp_label)
 
         # Transient inline error label (hidden by default)
@@ -463,11 +489,11 @@ class PluginRow(QFrame):
 
     def _build_toggle(self, layout: QHBoxLayout, data: PluginRowData) -> None:
         """Add the auto-update toggle button."""
-        toggle_btn = QPushButton('\u21ba')
+        toggle_btn = QPushButton("\u21ba")
         toggle_btn.setCheckable(True)
         toggle_btn.setChecked(data.auto_update)
         toggle_btn.setStyleSheet(PLUGIN_ROW_TOGGLE_STYLE)
-        toggle_btn.setToolTip('Auto-update this package')
+        toggle_btn.setToolTip("Auto-update this package")
         toggle_btn.clicked.connect(
             lambda checked: self.auto_update_toggled.emit(
                 self._signal_key,
@@ -479,10 +505,10 @@ class PluginRow(QFrame):
 
     def _build_update_button(self, layout: QHBoxLayout, data: PluginRowData) -> None:
         """Add the per-package update button (always created, visibility toggled)."""
-        update_btn = QPushButton('Update')
+        update_btn = QPushButton("Update")
         update_btn.setStyleSheet(PLUGIN_ROW_UPDATE_STYLE)
         update_btn.setFixedWidth(PLUGIN_ROW_UPDATE_WIDTH)
-        update_btn.setToolTip(f'Update {data.name}')
+        update_btn.setToolTip(f"Update {data.name}")
         update_btn.clicked.connect(
             lambda: self.update_requested.emit(self._signal_key, self._package_name),
         )
@@ -504,18 +530,24 @@ class PluginRow(QFrame):
 
     def _build_remove_button(self, layout: QHBoxLayout, data: PluginRowData) -> None:
         """Add the remove button — enabled only for global packages."""
-        remove_btn = QPushButton('\u00d7')
+        remove_btn = QPushButton("\u00d7")
         remove_btn.setFixedSize(18, 18)
         remove_btn.setStyleSheet(PLUGIN_ROW_REMOVE_STYLE)
         remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         if data.is_global:
-            remove_btn.setToolTip(f'Remove {data.name}')
+            remove_btn.setToolTip(f"Remove {data.name}")
             remove_btn.clicked.connect(
-                lambda: self.remove_requested.emit(self._signal_key, self._package_name),
+                lambda: self.remove_requested.emit(
+                    self._signal_key, self._package_name
+                ),
             )
         else:
             remove_btn.setEnabled(False)
-            tooltip = f"Managed by project '{data.project}'" if data.project else 'Managed by a project manifest'
+            tooltip = (
+                f"Managed by project '{data.project}'"
+                if data.project
+                else "Managed by a project manifest"
+            )
             remove_btn.setToolTip(tooltip)
             remove_btn.setCursor(Qt.CursorShape.ArrowCursor)
         self._remove_btn = remove_btn
@@ -549,13 +581,13 @@ class PluginRow(QFrame):
     def _apply_phase_idle(self) -> None:
         """Restore the update button to its default label and state."""
         if self._update_btn is not None:
-            self._update_btn.setText('Update')
+            self._update_btn.setText("Update")
             self._update_btn.setEnabled(True)
 
     def _apply_phase_pending(self) -> None:
         """Show *Pending* text and hide the update button."""
         if self._update_status_label is not None:
-            self._update_status_label.setText('Pending')
+            self._update_status_label.setText("Pending")
             self._update_status_label.setStyleSheet(PLUGIN_ROW_STATUS_PENDING_STYLE)
             self._update_status_label.show()
         if self._update_btn is not None:
@@ -586,13 +618,13 @@ class PluginRow(QFrame):
         if self._remove_btn is None:
             return
         if removing:
-            self._remove_btn.setText('Removing\u2026')
+            self._remove_btn.setText("Removing\u2026")
             self._remove_btn.setEnabled(False)
         else:
-            self._remove_btn.setText('\u00d7')
+            self._remove_btn.setText("\u00d7")
             self._remove_btn.setEnabled(True)
 
-    def set_update_status(self, text: str, style: str = '') -> None:
+    def set_update_status(self, text: str, style: str = "") -> None:
         """Show inline auto-update check status (e.g. 'Up to date')."""
         if self._update_status_label is None:
             return
@@ -606,7 +638,7 @@ class PluginRow(QFrame):
         if self._timestamp_label is not None:
             tip = self._timestamp_label.toolTip()
             # Extract ISO timestamp from tooltip
-            prefix = 'Last updated: '
+            prefix = "Last updated: "
             if tip.startswith(prefix):
                 iso = tip[len(prefix) :]
                 self._timestamp_label.setText(_format_relative_time(iso))
@@ -645,7 +677,7 @@ class ProjectChildRow(QFrame):
         self,
         project: ProjectInstance,
         *,
-        package_name: str = '',
+        package_name: str = "",
         parent: QWidget | None = None,
     ) -> None:
         """Initialize the project child row.
@@ -656,7 +688,7 @@ class ProjectChildRow(QFrame):
             parent: Optional parent widget.
         """
         super().__init__(parent)
-        self.setObjectName('projectChildRow')
+        self.setObjectName("projectChildRow")
         self.setStyleSheet(PROJECT_CHILD_ROW_STYLE)
         self._project_path = project.project_path
 
@@ -677,7 +709,7 @@ class ProjectChildRow(QFrame):
 
         # Transitive annotation
         if project.is_transitive:
-            transitive_label = QLabel('(transitive)')
+            transitive_label = QLabel("(transitive)")
             transitive_label.setStyleSheet(PROJECT_CHILD_TRANSITIVE_STYLE)
             layout.addWidget(transitive_label)
 
@@ -690,12 +722,14 @@ class ProjectChildRow(QFrame):
             layout.addWidget(version_label)
 
         # Navigate button
-        nav_btn = QPushButton('\u2192')
+        nav_btn = QPushButton("\u2192")
         nav_btn.setFixedSize(18, 18)
         nav_btn.setStyleSheet(PROJECT_CHILD_NAV_STYLE)
         nav_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        nav_btn.setToolTip(f'Open project: {project.project_label}')
-        nav_btn.clicked.connect(lambda: self.navigate_to_project.emit(self._project_path))
+        nav_btn.setToolTip(f"Open project: {project.project_label}")
+        nav_btn.clicked.connect(
+            lambda: self.navigate_to_project.emit(self._project_path)
+        )
         layout.addWidget(nav_btn)
 
 
@@ -722,4 +756,6 @@ class FilterChip(QPushButton):
         self.setChecked(True)
         self.setStyleSheet(FILTER_CHIP_STYLE)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.toggled.connect(lambda checked: self.toggled_with_name.emit(self._plugin_name, checked))
+        self.toggled.connect(
+            lambda checked: self.toggled_with_name.emit(self._plugin_name, checked)
+        )

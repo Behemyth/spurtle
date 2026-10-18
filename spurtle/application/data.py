@@ -17,14 +17,13 @@ import logging
 
 from porringer.api import API
 from porringer.backend.command.core.discovery import DiscoveredPlugins
-from porringer.core.plugin_schema.plugin_manager import PluginManager
 from porringer.schema import (
     CheckParameters,
     CheckResult,
 )
-from porringer.schema.check import RuntimeCheckResult
 
 from spurtle.application.schema import Snapshot
+from spurtle.operations.project import list_projects
 
 logger = logging.getLogger(__name__)
 
@@ -112,27 +111,10 @@ class DataCoordinator:
         Returns:
             A list of :class:`CheckResult` per plugin.
         """
-        params = CheckParameters(plugins=plugins)
-        return await self._porringer.package.check_updates(
-            params,
-            plugins=self._snapshot.discovered,
+        params = CheckParameters(
+            plugin_names=set(plugins) if plugins is not None else None
         )
-
-    async def check_updates_by_runtime(
-        self,
-        plugins: list[str] | None = None,
-    ) -> list[RuntimeCheckResult]:
-        """Run per-runtime update detection using cached ``DiscoveredPlugins``.
-
-        Args:
-            plugins: Optional include-set of plugin names.  ``None``
-                means all plugins.
-
-        Returns:
-            A list of :class:`RuntimeCheckResult` per runtime.
-        """
-        params = CheckParameters(plugins=plugins)
-        return await self._porringer.package.check_updates_by_runtime(
+        return await self._porringer.package.check_updates(
             params,
             plugins=self._snapshot.discovered,
         )
@@ -144,61 +126,34 @@ class DataCoordinator:
 
         1. ``API.discover_plugins()`` — plugin entry-points + runtime
            context in one shot.
-        2. ``PluginCommands.list()`` — installed status + versions,
+        2. ``api.extension.list()`` — installed status + versions,
            passing the already-discovered ``DiscoveredPlugins``.
-        3. ``cache.list_directories(validate=True, check_manifest=True)``
-           — directory listing with validation baked in.
-        4. Filter ``project_environments`` for ``PluginManager`` instances.
+        3. Registered project directories with validation baked in.
 
         All blocking calls are dispatched via ``asyncio.to_thread``.
         """
-        loop = asyncio.get_running_loop()
-
-        # Step 1: discover all plugins + resolve runtime context
         discovered = await API.discover_plugins()
 
-        # Step 2 + 3 in parallel: plugin list + validated directories
         plugins_task = asyncio.create_task(
-            self._porringer.plugin.list(plugins=discovered),
+            self._porringer.extension.list(plugins=discovered),
         )
-        dirs_future = loop.run_in_executor(
-            None,
-            lambda: self._porringer.cache.list_directories(
-                validate=True,
-                check_manifest=True,
-            ),
-        )
-
+        directories = await asyncio.to_thread(list_projects, self._porringer)
         plugins = await plugins_task
-        validated = await dirs_future
 
-        # Step 4: extract PluginManager instances from project_environments
-        managers: dict[str, PluginManager] = {}
-        for _name, env in discovered.project_environments.items():
-            if isinstance(env, PluginManager) and env.is_available():
-                managers[env.tool_name()] = env
-
-        # Step 5: collect protocol capabilities for each plugin
         capabilities: dict[str, frozenset] = {
-            plugin.name: frozenset(discovered.capabilities(plugin.name)) for plugin in plugins
+            plugin.name: frozenset(discovered.capabilities(plugin.name))
+            for plugin in plugins
         }
 
-        # Derive the un-validated directory list for callers that only
-        # need path + name (e.g. _gather_packages).
-        directories = [r.directory for r in validated]
-
         logger.info(
-            'Discovery complete: %d plugin(s), %d directory(ies), %d plugin manager(s)',
+            "Discovery complete: %d plugin(s), %d directory(ies)",
             len(plugins),
             len(directories),
-            len(managers),
         )
 
         return Snapshot(
             plugins=plugins,
             directories=directories,
-            validated_directories=validated,
             discovered=discovered,
-            plugin_managers=managers,
             plugin_capabilities=capabilities,
         )

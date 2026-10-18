@@ -7,16 +7,17 @@ from collections import OrderedDict
 from pathlib import Path
 
 from porringer.api import API
-from porringer.backend.builder import Builder
-from porringer.core.plugin_schema.plugin_manager import PluginManager
-from porringer.core.plugin_schema.project_environment import ProjectEnvironment
-from porringer.schema import (
-    ManifestDirectory,
-    PluginInfo,
-    SetupAction,
+from porringer.schema import PluginInfo
+from porringer.schema.plugin import PluginKind
+from PySide6.QtCore import (
+    QEasingCurve,
+    QEvent,
+    QObject,
+    QPropertyAnimation,
+    Qt,
+    QTimer,
+    Signal,
 )
-from porringer.schema.plugin import PluginKind, RuntimePackageResult
-from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPropertyAnimation, Qt, QTimer, Signal
 from PySide6.QtGui import QKeyEvent, QKeySequence, QShortcut, QShowEvent
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -50,7 +51,6 @@ from spurtle.application.screen.schema import (
 )
 from spurtle.application.screen.spinner import LoadingIndicator
 from spurtle.application.screen.update_banner import UpdateBanner
-from spurtle.application.screen.wsl import WslView
 from spurtle.application.theme import (
     COMPACT_MARGINS,
     FILTER_CHIP_SPACING,
@@ -66,14 +66,13 @@ from spurtle.application.theme import (
     SEARCH_INPUT_STYLE,
     SETTINGS_GEAR_STYLE,
 )
+from spurtle.operations.schema import ProjectInfo
+from spurtle.operations.tool import check_tool_updates, declared_packages
 
 logger = logging.getLogger(__name__)
 
 # Plugin kinds that support auto-update and per-plugin upgrade.
 _UPDATABLE_KINDS = frozenset({PluginKind.TOOL, PluginKind.PACKAGE, PluginKind.RUNTIME})
-
-# Kinds whose packages are inherently global (no per-directory queries).
-_GLOBAL_ONLY_KINDS = frozenset({PluginKind.RUNTIME})
 
 # Preferred display ordering â€” Tools first, then alphabetical for the rest.
 _KIND_DISPLAY_ORDER: dict[PluginKind, int] = {
@@ -86,11 +85,11 @@ _KIND_DISPLAY_ORDER: dict[PluginKind, int] = {
 
 
 class ToolsView(QWidget):
-    """Central update hub showing installed tools and packages.
+    """Central update hub for the packages and tools projects declare.
 
-    Only displays ``TOOL`` and ``PACKAGE`` kind plugins that have a
-    ``tool_version`` or managed packages.  Each tool has ``Auto`` /
-    ``Update`` controls.  Empty plugins are hidden.
+    Shows ``TOOL``, ``PACKAGE``, and ``RUNTIME`` entries declared by
+    registered project manifests, grouped by the plugin that manages
+    them.  Each tool has ``Auto`` / ``Update`` controls.
     """
 
     update_all_requested = Signal()
@@ -141,7 +140,7 @@ class ToolsView(QWidget):
         self._deselected_plugins: set[str] = set()
         self._refresh_in_progress = False
         self._check_in_progress = False
-        self._directories: list[ManifestDirectory] = []
+        self._directories: list[ProjectInfo] = []
         self._timestamp_timer: QTimer | None = None
         self._init_ui()
 
@@ -164,7 +163,7 @@ class ToolsView(QWidget):
         filter_layout.setSpacing(4)
 
         self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText('Search packages\u2026')
+        self._search_input.setPlaceholderText("Search packages\u2026")
         self._search_input.setClearButtonEnabled(True)
         self._search_input.setStyleSheet(SEARCH_INPUT_STYLE)
         self._search_input.textChanged.connect(self._apply_filter)
@@ -182,7 +181,7 @@ class ToolsView(QWidget):
         outer.addWidget(self._filter_panel)
 
         # Animation for filter panel slide-in / slide-out
-        self._filter_anim = QPropertyAnimation(self._filter_panel, b'maximumHeight')
+        self._filter_anim = QPropertyAnimation(self._filter_panel, b"maximumHeight")
         self._filter_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._filter_anim.setDuration(FILTER_PANEL_ANIMATION_MS)
         self._filter_panel_open = False
@@ -204,7 +203,7 @@ class ToolsView(QWidget):
         self._scroll.setWidget(self._container)
         outer.addWidget(self._scroll)
 
-        self._loading_indicator = LoadingIndicator('Loading tools\u2026')
+        self._loading_indicator = LoadingIndicator("Loading tools\u2026")
         outer.addWidget(self._loading_indicator)
 
         # Periodic timer to refresh relative timestamps (every 60s)
@@ -217,8 +216,8 @@ class ToolsView(QWidget):
         """Build the toolbar with filter toggle and action buttons."""
         toolbar = QHBoxLayout()
 
-        self._filter_btn = QPushButton('\U0001f50d')
-        self._filter_btn.setToolTip('Filter packages (Ctrl+F)')
+        self._filter_btn = QPushButton("\U0001f50d")
+        self._filter_btn.setToolTip("Filter packages (Ctrl+F)")
         self._filter_btn.setFlat(True)
         self._filter_btn.setStyleSheet(FILTER_TOGGLE_STYLE)
         self._filter_btn.clicked.connect(self._toggle_filter_panel)
@@ -226,14 +225,14 @@ class ToolsView(QWidget):
 
         toolbar.addStretch()
 
-        check_btn = QPushButton('Check for Updates')
-        check_btn.setToolTip('Scan all manifests for available package updates')
+        check_btn = QPushButton("Check for Updates")
+        check_btn.setToolTip("Scan all manifests for available package updates")
         check_btn.clicked.connect(self._on_check_for_updates)
         toolbar.addWidget(check_btn)
         self._check_btn = check_btn
 
-        self._update_all_btn = QPushButton('Update All')
-        self._update_all_btn.setToolTip('Upgrade all auto-update-enabled plugins now')
+        self._update_all_btn = QPushButton("Update All")
+        self._update_all_btn.setToolTip("Upgrade all auto-update-enabled plugins now")
         self._update_all_btn.clicked.connect(self.update_all_requested.emit)
         toolbar.addWidget(self._update_all_btn)
 
@@ -259,30 +258,28 @@ class ToolsView(QWidget):
         """Schedule an asynchronous rebuild of the tool list."""
         if self._refresh_in_progress:
             return
-        logger.debug('ToolsView.refresh() called (visible=%s)', self.isVisible())
+        logger.debug("ToolsView.refresh() called (visible=%s)", self.isVisible())
         asyncio.create_task(self._async_refresh())
 
     async def _async_refresh(self) -> None:
         """Rebuild the tool list from porringer data.
 
-        Fetches plugins and packages in parallel, then builds the
-        widget tree.  Update-availability detection is deferred to a
-        background task so the widget tree renders immediately.
+        One inspection of the registered manifests provides the rows,
+        their installed versions, and their update badges.
         """
         self._refresh_in_progress = True
         self._scroll.hide()
         self._loading_indicator.start()
         self._check_btn.setEnabled(False)
         self._update_all_btn.setEnabled(False)
-        need_deferred_check = False
 
         try:
             data = await self._gather_refresh_data()
-            need_deferred_check = not self._has_update_data
+            self._store_check_results(data.available)
             self._build_widget_tree(data)
+            self._apply_update_badges()
         except Exception:
-            logger.exception('Failed to refresh tools')
-            need_deferred_check = False
+            logger.exception("Failed to refresh tools")
         finally:
             self._loading_indicator.stop()
             self._scroll.show()
@@ -290,25 +287,16 @@ class ToolsView(QWidget):
             self._update_all_btn.setEnabled(True)
             self._refresh_in_progress = False
 
-        # Fire-and-forget: detect updates in the background, then patch
-        # the just-rendered widget tree with update badges.
-        if need_deferred_check:
-            asyncio.create_task(self._deferred_update_check())
-
     # ------------------------------------------------------------------
     # _async_refresh helper methods
     # ------------------------------------------------------------------
 
-    async def _gather_refresh_data(self) -> RefreshData:
-        """Fetch plugins, packages, and manifest requirements in parallel.
+    def _manifest_paths(self) -> list[str]:
+        """Return the registered project directories that have a manifest."""
+        return [d.path for d in self._directories if d.exists and d.has_manifest]
 
-        For PACKAGE-kind plugins that are ``RuntimeConsumer`` instances,
-        per-runtime package queries are attempted via
-        ``list_packages_by_runtime``.  Plugins that succeed are excluded
-        from the regular global package query (their global packages come
-        from the per-runtime results); venv-scoped packages are still
-        gathered via the standard ``_gather_packages`` path with
-        ``skip_global=True``.
+    async def _gather_refresh_data(self) -> RefreshData:
+        """Fetch plugins and the packages registered manifests declare.
 
         Returns:
             A :class:`RefreshData` bundle containing all data needed
@@ -316,96 +304,47 @@ class ToolsView(QWidget):
         """
         plugins, directories = await self._fetch_data()
         self._directories = directories
-
-        updatable_plugins = [p for p in plugins if p.kind in _UPDATABLE_KINDS]
         discovered = self._coordinator.discovered_plugins if self._coordinator else None
 
-        # --- Per-runtime probing for PACKAGE-kind plugins ---
-        runtime_packages: dict[str, list] = {}
-        runtime_probed: set[str] = set()
+        declared = await declared_packages(
+            self._porringer, self._manifest_paths(), discovered
+        )
 
-        package_plugins = [p for p in updatable_plugins if p.kind == PluginKind.PACKAGE]
-        if package_plugins and discovered is not None:
-            probe_tasks: dict[str, asyncio.Task] = {}
-            async with asyncio.TaskGroup() as tg:
-                for plugin in package_plugins:
-                    probe_tasks[plugin.name] = tg.create_task(
-                        self._gather_runtime_packages(plugin.name, discovered),
-                    )
-            for name, task in probe_tasks.items():
-                result = task.result()
-                if result is not None:
-                    runtime_packages[name] = result
-                    runtime_probed.add(name)
-
-        # --- Standard package queries ---
-        async with asyncio.TaskGroup() as tg:
-            pkg_tasks: dict[str, asyncio.Task] = {}
-            for plugin in updatable_plugins:
-                if plugin.name in runtime_probed:
-                    # Runtime-probed plugins show only per-runtime
-                    # packages; venv/project packages belong in
-                    # ProjectsView and are intentionally skipped here.
-                    continue
-                else:
-                    pkg_tasks[plugin.name] = tg.create_task(
-                        self._gather_packages(
-                            plugin.name,
-                            [] if plugin.kind in _GLOBAL_ONLY_KINDS else directories,
-                        ),
-                    )
-            req_tasks = [tg.create_task(self._gather_project_requirements(d)) for d in directories]
-            tool_plugins_task = tg.create_task(self._gather_tool_plugins())
-
-        packages_map = {name: task.result() for name, task in pkg_tasks.items()}
-
-        # Merge tool-managed sub-plugins into the environment plugin
-        # that owns the host tool (e.g. cppython → pipx's pdm entry).
-        for host_tool, sub_packages in tool_plugins_task.result().items():
-            for env_packages in packages_map.values():
-                if any(entry.name == host_tool for entry in env_packages):
-                    env_packages.extend(sub_packages)
-                    break
-
-        manifest_packages = self._collect_manifest_packages(req_tasks)
-
-        # Extract default runtime executable
-        default_runtime_executable = None
-        if discovered is not None and discovered.runtime_context is not None:
-            default_runtime_executable = discovered.runtime_context.get('python')
+        packages_map: dict[str, list[PackageEntry]] = {}
+        manifest_packages: dict[str, set[str]] = {}
+        available: dict[str, dict[str, str]] = {}
+        for item in declared:
+            version = item.installed_version or ""
+            entries = packages_map.setdefault(item.plugin, [])
+            entries.append(PackageEntry(name=item.name, version=version))
+            entries.extend(
+                PackageEntry(
+                    name=item.name,
+                    project_label=Path(project_path).name,
+                    version=version,
+                    project_path=project_path,
+                )
+                for project_path in item.project_paths
+            )
+            manifest_packages.setdefault(item.plugin, set()).add(item.name)
+            if item.available_version is not None:
+                available.setdefault(item.plugin, {})[item.name] = (
+                    item.available_version
+                )
 
         return RefreshData(
             plugins=plugins,
             packages_map=packages_map,
             manifest_packages=manifest_packages,
-            runtime_packages=runtime_packages,
-            default_runtime_executable=default_runtime_executable,
+            available=available,
         )
-
-    @staticmethod
-    def _collect_manifest_packages(
-        req_tasks: list[asyncio.Task[list[SetupAction]]],
-    ) -> dict[str, set[str]]:
-        """Extract manifest package names from completed requirement tasks."""
-        manifest_packages: dict[str, set[str]] = {}
-        for task in req_tasks:
-            for action in task.result():
-                if action.package and action.installer:
-                    manifest_packages.setdefault(action.installer, set()).add(
-                        str(action.package.name),
-                    )
-        return manifest_packages
 
     def _build_widget_tree(self, data: RefreshData) -> None:
         """Clear existing widgets and rebuild the tool/package tree."""
         self._clear_section_widgets()
 
         auto_update_map = self._store.config.plugin_auto_update or {}
-        kind_buckets = self._bucket_by_kind(
-            data.plugins,
-            data.packages_map,
-            data.runtime_packages,
-        )
+        kind_buckets = self._bucket_by_kind(data.plugins, data.packages_map)
 
         sorted_kinds = sorted(
             kind_buckets,
@@ -415,10 +354,7 @@ class ToolsView(QWidget):
         for kind in sorted_kinds:
             self._insert_section_widget(PluginKindHeader(kind, parent=self._container))
             for plugin in kind_buckets[kind]:
-                if plugin.name in data.runtime_packages:
-                    self._build_runtime_sections(plugin, data, auto_update_map)
-                else:
-                    self._build_plugin_section(plugin, data, auto_update_map)
+                self._build_plugin_section(plugin, data, auto_update_map)
 
         self._rebuild_chips()
         self._apply_filter()
@@ -434,105 +370,15 @@ class ToolsView(QWidget):
     def _bucket_by_kind(
         plugins: list[PluginInfo],
         packages_map: dict[str, list[PackageEntry]],
-        runtime_packages: dict[str, list] | None = None,
     ) -> OrderedDict[PluginKind, list[PluginInfo]]:
         """Group updatable plugins by kind, filtering out empty entries."""
         buckets: OrderedDict[PluginKind, list[PluginInfo]] = OrderedDict()
-        rp = runtime_packages or {}
         for plugin in plugins:
             if plugin.kind not in _UPDATABLE_KINDS:
                 continue
-            has_content = (
-                plugin.tool_version is not None or bool(packages_map.get(plugin.name)) or bool(rp.get(plugin.name))
-            )
-            if has_content:
+            if plugin.tool_version is not None or bool(packages_map.get(plugin.name)):
                 buckets.setdefault(plugin.kind, []).append(plugin)
         return buckets
-
-    def _build_runtime_sections(
-        self,
-        plugin: PluginInfo,
-        data: RefreshData,
-        auto_update_map: dict[str, bool | dict[str, bool]],
-    ) -> None:
-        """Build per-runtime provider headers and package rows.
-
-        Each ``RuntimePackageResult`` becomes a separate
-        :class:`PluginProviderHeader` with a runtime tag pill.
-        The default runtime (matched by executable) is placed first.
-        """
-        runtime_results: list[RuntimePackageResult] = data.runtime_packages[plugin.name]
-        if not runtime_results:
-            return
-
-        auto_val = auto_update_map.get(plugin.name, True)
-        tool_timestamps = self._store.config.last_tool_updates or {}
-        default_exe = data.default_runtime_executable
-
-        # Sort: default runtime first, then descending by tag
-        def _sort_key(rt: RuntimePackageResult) -> tuple[int, str]:
-            is_default = 1 if (default_exe is not None and rt.executable == default_exe) else 0
-            return (-is_default, rt.tag)
-
-        sorted_results = sorted(runtime_results, key=_sort_key)
-
-        for rt in sorted_results:
-            is_default = default_exe is not None and rt.executable == default_exe
-            tag_text = f'Python {rt.tag}'
-            if is_default:
-                tag_text += ' (default)'
-
-            # Runtime updates use composite keys "plugin:tag"
-            rt_updates = self._get_plugin_updates(f'{plugin.name}:{rt.tag}')
-
-            provider = PluginProviderHeader(
-                plugin,
-                auto_val is not False,
-                capabilities=(
-                    self._coordinator.snapshot.plugin_capabilities.get(plugin.name, frozenset())
-                    if self._coordinator is not None
-                    else frozenset()
-                ),
-                show_controls=True,
-                has_updates=bool(rt_updates),
-                parent=self._container,
-            )
-            provider.set_runtime(rt.tag, label=tag_text)
-            provider.auto_update_toggled.connect(self._on_auto_update_toggled)
-            provider.check_requested.connect(self.plugin_check_requested.emit)
-            provider.update_requested.connect(self.plugin_update_requested.emit)
-            self._insert_section_widget(provider)
-
-            # Convert RuntimePackageResult.packages to PackageEntry list
-            raw_packages = [
-                PackageEntry(
-                    name=str(pkg.name),
-                    version=str(pkg.version) if pkg.version else '',
-                    host_tool=pkg.relation.host if pkg.relation else '',
-                )
-                for pkg in rt.packages
-            ]
-            plugin_manifest = data.manifest_packages.get(plugin.name, set())
-            display_packages = self._build_display_packages(raw_packages, plugin_manifest)
-
-            for pkg in display_packages:
-                pkg_auto = self._resolve_package_auto_update(auto_val, pkg.name, pkg.is_global)
-                ts_key = f'{plugin.name}/{pkg.name}'
-                row = self._create_connected_row(
-                    PluginRowData(
-                        name=pkg.name,
-                        version=pkg.global_version or '',
-                        plugin_name=plugin.name,
-                        auto_update=pkg_auto,
-                        show_toggle=True,
-                        has_update=pkg.name in rt_updates,
-                        is_global=True,
-                        host_tool=pkg.host_tool,
-                        runtime_tag=rt.tag,
-                        last_updated=tool_timestamps.get(ts_key, ''),
-                    ),
-                )
-                self._insert_section_widget(row)
 
     def _build_plugin_section(
         self,
@@ -574,12 +420,16 @@ class ToolsView(QWidget):
 
         if display_packages:
             for pkg in display_packages:
-                pkg_auto = self._resolve_package_auto_update(auto_val, pkg.name, pkg.is_global)
-                ts_key = f'{plugin.name}/{pkg.name}'
+                pkg_auto = self._resolve_package_auto_update(
+                    auto_val,
+                    pkg.name,
+                    pkg.is_global and pkg.name not in plugin_manifest,
+                )
+                ts_key = f"{plugin.name}/{pkg.name}"
                 row = self._create_connected_row(
                     PluginRowData(
                         name=pkg.name,
-                        version=pkg.global_version or '',
+                        version=pkg.global_version or "",
                         plugin_name=plugin.name,
                         auto_update=pkg_auto,
                         show_toggle=True,
@@ -587,13 +437,18 @@ class ToolsView(QWidget):
                         is_global=pkg.is_global,
                         host_tool=pkg.host_tool,
                         project_instances=list(pkg.project_instances),
-                        last_updated=tool_timestamps.get(ts_key, ''),
+                        last_updated=tool_timestamps.get(ts_key, ""),
                     ),
                 )
                 self._insert_section_widget(row)
         else:
-            version_text = str(plugin.tool_version) if plugin.tool_version is not None else ''
-            row = PluginRow(PluginRowData(name=plugin.name, version=version_text), parent=self._container)
+            version_text = (
+                str(plugin.tool_version) if plugin.tool_version is not None else ""
+            )
+            row = PluginRow(
+                PluginRowData(name=plugin.name, version=version_text),
+                parent=self._container,
+            )
             self._insert_section_widget(row)
 
     @staticmethod
@@ -755,7 +610,11 @@ class ToolsView(QWidget):
 
     def _update_filter_badge(self) -> None:
         """Swap the toggle-button style to indicate active filters."""
-        style = FILTER_TOGGLE_ACTIVE_STYLE if self._has_active_filter else FILTER_TOGGLE_STYLE
+        style = (
+            FILTER_TOGGLE_ACTIVE_STYLE
+            if self._has_active_filter
+            else FILTER_TOGGLE_STYLE
+        )
         self._filter_btn.setStyleSheet(style)
 
     def _clear_active_filters(self) -> None:
@@ -822,7 +681,9 @@ class ToolsView(QWidget):
 
         for widget in self._section_widgets:
             if isinstance(widget, PluginKindHeader):
-                kind_has_visible |= self._finalise_provider(current_provider, provider_has_visible_child)
+                kind_has_visible |= self._finalise_provider(
+                    current_provider, provider_has_visible_child
+                )
                 if current_kind_header is not None:
                     current_kind_header.setVisible(kind_has_visible)
 
@@ -832,7 +693,9 @@ class ToolsView(QWidget):
                 provider_has_visible_child = False
 
             elif isinstance(widget, PluginProviderHeader):
-                kind_has_visible |= self._finalise_provider(current_provider, provider_has_visible_child)
+                kind_has_visible |= self._finalise_provider(
+                    current_provider, provider_has_visible_child
+                )
 
                 current_provider = widget
                 provider_has_visible_child = False
@@ -855,7 +718,9 @@ class ToolsView(QWidget):
                     provider_has_visible_child = True
 
         # Finalise last provider and kind
-        kind_has_visible |= self._finalise_provider(current_provider, provider_has_visible_child)
+        kind_has_visible |= self._finalise_provider(
+            current_provider, provider_has_visible_child
+        )
         if current_kind_header is not None:
             current_kind_header.setVisible(kind_has_visible)
 
@@ -876,211 +741,16 @@ class ToolsView(QWidget):
         self._container_layout.insertWidget(idx, widget)
         self._section_widgets.append(widget)
 
-    async def _fetch_data(self) -> tuple[list[PluginInfo], list[ManifestDirectory]]:
+    async def _fetch_data(self) -> tuple[list[PluginInfo], list[ProjectInfo]]:
         """Fetch plugin list and directories via the coordinator (or direct fallback)."""
         if self._coordinator is not None:
             snapshot = await self._coordinator.refresh()
             return snapshot.plugins, snapshot.directories
-        plugins = await self._porringer.plugin.list()
-        directories = [r.directory for r in self._porringer.cache.list_directories()]
+        from spurtle.operations.project import list_projects
+
+        plugins = await self._porringer.extension.list()
+        directories = await asyncio.to_thread(list_projects, self._porringer)
         return plugins, directories
-
-    async def _gather_packages(
-        self,
-        plugin_name: str,
-        directories: list[ManifestDirectory],
-        *,
-        skip_global: bool = False,
-    ) -> list[PackageEntry]:
-        """Collect packages managed by *plugin_name*.
-
-        A global query (``project_path=None``) is always issued so that
-        globally-scoped plugins (pipx, apt, brew) report their packages
-        â€” including injected packages â€” even when no directories are
-        cached.  Per-directory queries run in parallel alongside it to
-        capture project-scoped packages.
-
-        Returns:
-            A list of :class:`PackageEntry` instances.
-        """
-        packages: list[PackageEntry] = []
-        discovered = self._coordinator.discovered_plugins if self._coordinator else None
-
-        async def _list_global() -> None:
-            try:
-                pkgs = await self._porringer.package.list(
-                    plugin_name,
-                    plugins=discovered,
-                )
-                packages.extend(
-                    PackageEntry(
-                        name=str(pkg.name),
-                        version=str(pkg.version) if pkg.version else '',
-                        host_tool=pkg.relation.host if pkg.relation else '',
-                    )
-                    for pkg in pkgs
-                )
-            except Exception:
-                logger.debug(
-                    'Could not list global packages for %s',
-                    plugin_name,
-                    exc_info=True,
-                )
-
-        async def _list_one(directory: ManifestDirectory) -> None:
-            try:
-                pkgs = await self._porringer.package.list(
-                    plugin_name,
-                    Path(directory.path),
-                    plugins=discovered,
-                )
-                packages.extend(
-                    PackageEntry(
-                        name=str(pkg.name),
-                        project_label=directory.name or Path(directory.path).stem,
-                        version=str(pkg.version) if pkg.version else '',
-                        host_tool=pkg.relation.host if pkg.relation else '',
-                        project_path=str(directory.path),
-                    )
-                    for pkg in pkgs
-                )
-            except Exception:
-                logger.debug(
-                    'Could not list packages for %s in %s',
-                    plugin_name,
-                    directory.path,
-                    exc_info=True,
-                )
-
-        async with asyncio.TaskGroup() as tg:
-            if not skip_global:
-                tg.create_task(_list_global())
-            for d in directories:
-                tg.create_task(_list_one(d))
-        return packages
-
-    async def _gather_runtime_packages(self, plugin_name: str, discovered) -> list | None:
-        """Try ``list_packages_by_runtime`` for *plugin_name*.
-
-        Returns the list of :class:`RuntimePackageResult` on success,
-        or ``None`` when the plugin is not a ``RuntimeConsumer``.
-        """
-        try:
-            return await self._porringer.package.list_by_runtime(
-                plugin_name,
-                plugins=discovered,
-            )
-        except Exception:
-            logger.debug(
-                'Per-runtime probe failed for %s',
-                plugin_name,
-                exc_info=True,
-            )
-            return None
-
-        # ------------------------------------------------------------------
-
-    # PluginManager sub-plugin discovery
-    # ------------------------------------------------------------------
-
-    async def _gather_tool_plugins(
-        self,
-    ) -> dict[str, list[PackageEntry]]:
-        """Query :class:`PluginManager` instances for natively managed sub-plugins.
-
-        Uses the coordinator's pre-discovered ``plugin_managers`` when
-        available, avoiding redundant ``Builder.find_plugins`` calls.
-
-        Returns:
-            A dict mapping host-tool name (e.g. ``"pdm"``) to a list of
-            :class:`PackageEntry` instances.
-        """
-        results: dict[str, list[PackageEntry]] = {}
-
-        if self._coordinator is not None:
-            managers = self._coordinator.snapshot.plugin_managers
-        else:
-            # Fallback: discover from scratch (legacy path / tests)
-            loop = asyncio.get_running_loop()
-            managers = await loop.run_in_executor(None, self._discover_plugin_managers)
-
-        async def _query(tool_name: str, manager: PluginManager) -> None:
-            try:
-                plugins = await manager.installed_plugins()
-                results[tool_name] = [
-                    PackageEntry(
-                        name=str(pkg.name),
-                        version=str(pkg.version) if pkg.version else '',
-                        host_tool=pkg.relation.host if pkg.relation else tool_name,
-                    )
-                    for pkg in plugins
-                ]
-            except Exception:
-                logger.debug(
-                    'Could not list plugins for %s',
-                    tool_name,
-                    exc_info=True,
-                )
-
-        async with asyncio.TaskGroup() as tg:
-            for tool_name, manager in managers.items():
-                tg.create_task(_query(tool_name, manager))
-
-        return results
-
-    @staticmethod
-    def _discover_plugin_managers() -> dict[str, PluginManager]:
-        """Discover project-environment plugins implementing ``PluginManager`` (sync).
-
-        Fallback for when no ``DataCoordinator`` is available.
-
-        Returns:
-            A dict mapping tool name to :class:`PluginManager` instance.
-        """
-        project_types = Builder.find_plugins('project_environment', ProjectEnvironment)
-        instances = Builder.build_plugins(project_types)
-        managers: dict[str, PluginManager] = {}
-        for _info, inst in zip(project_types, instances, strict=True):
-            if isinstance(inst, PluginManager) and inst.is_available():
-                managers[inst.tool_name()] = inst
-        return managers
-
-    async def _gather_project_requirements(
-        self,
-        directory: ManifestDirectory,
-    ) -> list[SetupAction]:
-        """Load the manifest for *directory* and return its actions.
-
-        Delegates to :func:`~spurtle.operations.install.load_manifest_actions`
-        in the operations layer, passing pre-discovered plugins when
-        available for the efficient single-shot path.
-        """
-        actions: list[SetupAction] = []
-        try:
-            from spurtle.operations.install import load_manifest_actions
-            from spurtle.operations.project import find_manifest
-
-            path = Path(directory.path)
-            manifest_path = find_manifest(self._porringer, path)
-
-            if manifest_path is None:
-                return actions
-
-            discovered = self._coordinator.discovered_plugins if self._coordinator else None
-
-            actions = await load_manifest_actions(
-                self._porringer,
-                manifest_path,
-                project_directory=path,
-                discovered=discovered,
-            )
-        except Exception:
-            logger.debug(
-                'Could not gather requirements for %s',
-                directory.path,
-                exc_info=True,
-            )
-        return actions
 
     # --- Callbacks ---
 
@@ -1095,7 +765,7 @@ class ToolsView(QWidget):
 
         new_value = mapping if mapping else None
         self._store.update(plugin_auto_update=new_value)
-        logger.info('Auto-update for %s set to %s', plugin_name, enabled)
+        logger.info("Auto-update for %s set to %s", plugin_name, enabled)
 
     def _on_package_auto_update_toggled(
         self,
@@ -1122,7 +792,7 @@ class ToolsView(QWidget):
         new_value = mapping if mapping else None
         self._store.update(plugin_auto_update=new_value)
         logger.info(
-            'Auto-update for %s/%s set to %s',
+            "Auto-update for %s/%s set to %s",
             plugin_name,
             package_name,
             enabled,
@@ -1133,7 +803,7 @@ class ToolsView(QWidget):
         if self._check_in_progress or self._refresh_in_progress:
             return
         self._check_btn.setEnabled(False)
-        self._check_btn.setText('Checking\u2026')
+        self._check_btn.setText("Checking\u2026")
         self._set_all_checking(True)
         asyncio.create_task(self._run_inline_update_check())
 
@@ -1145,84 +815,27 @@ class ToolsView(QWidget):
         """
         self._check_in_progress = True
         try:
-            available = await self._check_for_updates(self._directories)
+            available = await self._check_for_updates()
             self._store_check_results(available)
             self._apply_update_badges()
         except Exception:
-            logger.debug('Inline update check failed', exc_info=True)
+            logger.debug("Inline update check failed", exc_info=True)
         finally:
             self._set_all_checking(False)
             self._check_btn.setEnabled(True)
-            self._check_btn.setText('Check for Updates')
+            self._check_btn.setText("Check for Updates")
             self._check_in_progress = False
 
-    async def _check_for_updates(
-        self,
-        directories: list[ManifestDirectory],
-    ) -> dict[str, dict[str, str]]:
-        """Detect available updates across cached manifests.
-
-        When a :class:`DataCoordinator` is available the efficient
-        ``check_updates()`` API is used (single call, no streaming).
-        Falls back to per-directory ``execute_stream`` dry-runs
-        otherwise.
+    async def _check_for_updates(self) -> dict[str, dict[str, str]]:
+        """Detect available updates for the packages registered manifests declare.
 
         Returns a mapping of ``{plugin_name: {package_name: latest_version}}``
         for packages that have a newer version available.
         """
-        if self._coordinator is not None:
-            return await self._check_updates_via_coordinator()
-
-        # Legacy per-directory fallback — delegate to the operations layer
-        from spurtle.operations.tool import check_tool_updates
-
-        return await check_tool_updates(self._porringer, directories)
-
-    async def _check_updates_via_coordinator(self) -> dict[str, dict[str, str]]:
-        """Use the coordinator's ``check_updates`` for efficient detection.
-
-        Fetches both flat (global) and per-runtime update results.
-        Per-runtime entries use composite keys ``"plugin:tag"`` so that
-        :meth:`_apply_update_badges` can match runtime-specific headers.
-        """
-        assert self._coordinator is not None
-        results, runtime_results = await asyncio.gather(
-            self._coordinator.check_updates(),
-            self._coordinator.check_updates_by_runtime(),
+        discovered = self._coordinator.discovered_plugins if self._coordinator else None
+        return await check_tool_updates(
+            self._porringer, self._manifest_paths(), discovered
         )
-        available: dict[str, dict[str, str]] = {}
-
-        # Flat (global) results keyed by bare plugin name
-        for cr in results:
-            if cr.success:
-                for pi in cr.packages:
-                    if pi.update_available:
-                        latest = str(pi.latest_version) if pi.latest_version else ''
-                        available.setdefault(cr.plugin, {})[pi.name] = latest
-
-        # Per-runtime results keyed by composite "plugin:tag"
-        for rcr in runtime_results:
-            for cr in rcr.results:
-                if cr.success:
-                    for pi in cr.packages:
-                        if pi.update_available:
-                            composite = f'{cr.plugin}:{rcr.tag}'
-                            latest = str(pi.latest_version) if pi.latest_version else ''
-                            available.setdefault(composite, {})[pi.name] = latest
-
-        return available
-
-    async def _deferred_update_check(self) -> None:
-        """Run update detection in the background, then patch the widget tree.
-
-        Called after the initial render so the user sees the tool list
-        immediately while update badges are populated asynchronously.
-        Delegates to :meth:`_run_inline_update_check`.
-        """
-        self._check_btn.setEnabled(False)
-        self._check_btn.setText('Checking\u2026')
-        self._set_all_checking(True)
-        await self._run_inline_update_check()
 
     def _get_plugin_updates(self, signal_key: str) -> dict[str, str]:
         """Return ``{package_name: latest_version}`` for *signal_key*.
@@ -1251,7 +864,7 @@ class ToolsView(QWidget):
 
     def _apply_update_badges(self) -> None:
         """Walk existing widgets and show/hide Update buttons + set inline status."""
-        current_plugin: str = ''
+        current_plugin: str = ""
         for widget in self._section_widgets:
             if isinstance(widget, PluginProviderHeader):
                 current_plugin = widget._signal_key
@@ -1269,10 +882,18 @@ class ToolsView(QWidget):
 
                 # Set inline status text
                 if has_update:
-                    version_text = f'v{latest_version} available' if latest_version else 'Update available'
-                    widget.set_update_status(version_text, PLUGIN_ROW_STATUS_AVAILABLE_STYLE)
+                    version_text = (
+                        f"v{latest_version} available"
+                        if latest_version
+                        else "Update available"
+                    )
+                    widget.set_update_status(
+                        version_text, PLUGIN_ROW_STATUS_AVAILABLE_STYLE
+                    )
                 elif self._has_update_data:
-                    widget.set_update_status('Up to date', PLUGIN_ROW_STATUS_UP_TO_DATE_STYLE)
+                    widget.set_update_status(
+                        "Up to date", PLUGIN_ROW_STATUS_UP_TO_DATE_STYLE
+                    )
 
     def _set_all_checking(self, checking: bool) -> None:
         """Show or hide inline checking spinners on all plugin rows."""
@@ -1330,7 +951,10 @@ class ToolsView(QWidget):
     def set_plugin_updating(self, plugin_name: str, updating: bool) -> None:
         """Toggle the *Updatingâ€¦* state on the header for *plugin_name*."""
         for widget in self._section_widgets:
-            if isinstance(widget, PluginProviderHeader) and widget._signal_key == plugin_name:
+            if (
+                isinstance(widget, PluginProviderHeader)
+                and widget._signal_key == plugin_name
+            ):
                 widget.set_updating(updating)
                 break
 
@@ -1385,7 +1009,10 @@ class ToolsView(QWidget):
     def set_plugin_error(self, plugin_name: str, message: str) -> None:
         """Show a transient inline error on the header for *plugin_name*."""
         for widget in self._section_widgets:
-            if isinstance(widget, PluginProviderHeader) and widget._signal_key == plugin_name:
+            if (
+                isinstance(widget, PluginProviderHeader)
+                and widget._signal_key == plugin_name
+            ):
                 widget.set_error(message)
                 break
 
@@ -1435,7 +1062,6 @@ class MainWindow(QMainWindow):
     _tabs: QTabWidget | None = None
     _tools_view: ToolsView | None = None
     _projects_view: ProjectsView | None = None
-    _wsl_view: WslView | None = None
 
     def __init__(
         self,
@@ -1451,9 +1077,13 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._porringer = porringer
         self._store = store
-        self._coordinator: DataCoordinator | None = DataCoordinator(porringer) if porringer is not None else None
-        self._package_store: PackageStateStore | None = PackageStateStore(self) if porringer is not None else None
-        self.setWindowTitle('Spurtle')
+        self._coordinator: DataCoordinator | None = (
+            DataCoordinator(porringer) if porringer is not None else None
+        )
+        self._package_store: PackageStateStore | None = (
+            PackageStateStore(self) if porringer is not None else None
+        )
+        self.setWindowTitle("Spurtle")
         self.setMinimumSize(*MAIN_WINDOW_MIN_SIZE)
         self.setWindowIcon(app_icon())
 
@@ -1463,9 +1093,9 @@ class MainWindow(QMainWindow):
     def showEvent(self, event: QShowEvent) -> None:
         """[DIAG] Log every show event with a stack trace."""
         geo = self.geometry()
-        stack = ''.join(traceback.format_stack(limit=10))
+        stack = "".join(traceback.format_stack(limit=10))
         logger.debug(
-            '[DIAG] MainWindow.showEvent: geo=(%d,%d %dx%d) visible=%s\n%s',
+            "[DIAG] MainWindow.showEvent: geo=(%d,%d %dx%d) visible=%s\n%s",
             geo.x(),
             geo.y(),
             geo.width(),
@@ -1497,7 +1127,11 @@ class MainWindow(QMainWindow):
 
     def show(self) -> None:
         """Show the window, initializing UI lazily on first show."""
-        if self._tabs is None and self._porringer is not None and self._store is not None:
+        if (
+            self._tabs is None
+            and self._porringer is not None
+            and self._store is not None
+        ):
             self._tabs = QTabWidget(self)
 
             self._projects_view = ProjectsView(
@@ -1507,43 +1141,33 @@ class MainWindow(QMainWindow):
                 coordinator=self._coordinator,
                 package_store=self._package_store,
             )
-            self._tabs.addTab(self._projects_view, 'Projects')
+            self._tabs.addTab(self._projects_view, "Projects")
 
-            self._tools_view = ToolsView(
+            from spurtle.application.screen.inventory_view import InventoryToolsView
+
+            self._tools_view = InventoryToolsView(
                 self._porringer,
                 self._store,
                 self,
                 coordinator=self._coordinator,
                 package_store=self._package_store,
             )
-            self._tabs.addTab(self._tools_view, 'Tools')
+            self._tabs.addTab(self._tools_view, "Tools")
             self.tools_view_created.emit(self._tools_view)
 
-            # WSL tab — only on Windows hosts with WSL available.
-            try:
-                from porringer.plugin.wsl.utility import is_wsl_host
-
-                if is_wsl_host():
-                    self._wsl_view = WslView(
-                        self._porringer,
-                        self._store,
-                        self,
-                        coordinator=self._coordinator,
-                        package_store=self._package_store,
-                    )
-                    self._tabs.addTab(self._wsl_view, 'WSL')
-            except Exception:
-                logger.debug('Could not initialise WSL tab', exc_info=True)
-
             # Navigate-to-project: switch to Projects tab and select directory
-            self._tools_view.navigate_to_project_requested.connect(self._navigate_to_project)
+            self._tools_view.navigate_to_project_requested.connect(
+                self._navigate_to_project
+            )
 
             # Navigate-to-tool: switch to Tools tab and highlight the package
-            self._projects_view.navigate_to_tool_requested.connect(self._navigate_to_tool)
+            self._projects_view.navigate_to_tool_requested.connect(
+                self._navigate_to_tool
+            )
 
-            gear_btn = QPushButton('\u2699')
+            gear_btn = QPushButton("\u2699")
             gear_btn.setStyleSheet(SETTINGS_GEAR_STYLE)
-            gear_btn.setToolTip('Settings')
+            gear_btn.setToolTip("Settings")
             gear_btn.setFlat(True)
             gear_btn.clicked.connect(self.settings_requested.emit)
             self._tabs.setCornerWidget(gear_btn)
@@ -1564,8 +1188,6 @@ class MainWindow(QMainWindow):
             self._tools_view.refresh()
         if self._projects_view is not None:
             self._projects_view.refresh()
-        if self._wsl_view is not None:
-            self._wsl_view.refresh()
 
     def _navigate_to_project(self, path_str: str) -> None:
         """Switch to the Projects tab and select the given directory."""

@@ -5,22 +5,27 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from porringer.core.schema import PackageRef
 from porringer.schema import (
     ActionCompletedEvent,
-    DiscoveredPluginEntry,
     DownloadResult,
+    InspectionMode,
+    InspectionStatus,
     ManifestLoadedEvent,
-    ManifestParsedEvent,
+    PluginCapability,
     PluginsDiscoveredEvent,
+    SetupAction,
     SetupActionResult,
+    SetupParameters,
     SetupResults,
     SkipReason,
+    SyncInspectionReport,
+    SyncPlan,
 )
 from porringer.schema.plugin import PluginKind
-
 from spurtle.application.screen import (
     ACTION_KIND_LABELS,
     SKIP_REASON_LABELS,
@@ -28,37 +33,58 @@ from spurtle.application.screen import (
     skip_reason_label,
 )
 from spurtle.application.screen.install_workers import run_install, run_preview
-from spurtle.application.screen.schema import InstallConfig, PreviewConfig
+from spurtle.application.screen.schema import PreviewConfig
 from spurtle.application.uri import normalize_manifest_key, resolve_local_path
 from spurtle.operations.schema import (
     PreviewActionChecked,
+    PreviewEvent,
     PreviewManifestParsed,
+    PreviewPlanned,
     PreviewPluginsQueried,
     PreviewReady,
 )
 
-_DOWNLOAD_PATCH = 'spurtle.application.screen.install_workers.API.download'
+from ..porringer_factories import (
+    checked,
+    loaded,
+    mock_plan,
+    mock_sync_run,
+    plugin_entry,
+)
+
+_DOWNLOAD_PATCH = "spurtle.application.screen.install_workers.API.download"
 _EXPECTED_CHECKED_COUNT = 2
+
+
+def _package_action(
+    name: str = "requests",
+    *,
+    kind: PluginKind = PluginKind.PACKAGE,
+    installer: str = "pip",
+) -> SetupAction:
+    """Build a real package ``SetupAction``."""
+    return SetupAction(
+        description=f"Install {name}",
+        kind=kind,
+        installer=installer,
+        package=PackageRef(name=name),
+    )
+
+
+def _scm_action(description: str = "Clone repo") -> SetupAction:
+    """Build a real SCM ``SetupAction``."""
+    return SetupAction(description=description, kind=PluginKind.SCM, installer="git")
+
+
+def _collect(porringer: MagicMock, url: str, **kwargs: Any) -> list[PreviewEvent]:
+    """Run ``run_preview`` and return every emitted event."""
+    events: list[PreviewEvent] = []
+    asyncio.run(run_preview(porringer, url, on_event=events.append, **kwargs))
+    return events
 
 
 class TestInstallPreviewWindow:
     """Tests for InstallPreviewWindow table population logic."""
-
-    @staticmethod
-    def _make_action(
-        kind: str = 'PACKAGE',
-        description: str = 'Install test',
-        installer: str = 'pip',
-        package: str = 'requests',
-    ) -> MagicMock:
-        """Create a mock SetupAction."""
-        action = MagicMock()
-        action.kind = getattr(PluginKind, kind)
-        action.description = description
-        action.installer = installer
-        action.package = package
-        action.command = None
-        return action
 
     @staticmethod
     def test_action_kind_labels() -> None:
@@ -76,10 +102,10 @@ class TestInstallPreviewWindow:
     @staticmethod
     def test_skip_reason_label_human_readable() -> None:
         """Verify skip reason labels are human-readable, not raw enum names."""
-        assert skip_reason_label(SkipReason.ALREADY_INSTALLED) == 'Already installed'
-        assert skip_reason_label(SkipReason.ALREADY_LATEST) == 'Already latest'
-        assert skip_reason_label(SkipReason.UPDATE_AVAILABLE) == 'Update available'
-        assert skip_reason_label(None) == 'Skipped'
+        assert skip_reason_label(SkipReason.ALREADY_INSTALLED) == "Already installed"
+        assert skip_reason_label(SkipReason.ALREADY_LATEST) == "Already latest"
+        assert skip_reason_label(SkipReason.UPDATE_AVAILABLE) == "Update available"
+        assert skip_reason_label(None) == "Skipped"
 
 
 class TestFormatCliCommand:
@@ -89,153 +115,102 @@ class TestFormatCliCommand:
     def _make_action(**overrides: Any) -> MagicMock:
         """Create a mock SetupAction with optional attribute overrides."""
         defaults: dict[str, Any] = {
-            'kind': 'PACKAGE',
-            'description': 'Install test',
-            'installer': 'pip',
-            'package': 'requests',
-            'command': None,
+            "kind": "PACKAGE",
+            "description": "Install test",
+            "installer": "pip",
+            "package": "requests",
+            "command": None,
         }
         defaults.update(overrides)
         action = MagicMock()
-        kind = defaults['kind']
+        kind = defaults["kind"]
         action.kind = getattr(PluginKind, kind) if isinstance(kind, str) else kind
-        action.description = defaults['description']
-        action.installer = defaults['installer']
-        action.package = defaults['package']
-        action.command = defaults['command']
+        action.description = defaults["description"]
+        action.installer = defaults["installer"]
+        action.package = defaults["package"]
+        action.command = defaults["command"]
         return action
 
     def test_prefers_cli_command_from_result(self) -> None:
         """Verify result cli_command takes precedence over command and fallback."""
         action = self._make_action()
         result = MagicMock()
-        result.cli_command = ('uv', 'pip', 'install', 'requests')
-        assert format_cli_command(action, result=result) == 'uv pip install requests'
+        result.cli_command = ("uv", "pip", "install", "requests")
+        assert format_cli_command(action, result=result) == "uv pip install requests"
 
     def test_falls_back_to_command(self) -> None:
         """Verify command is used when cli_command is absent."""
         action = self._make_action(
-            kind='TOOL',
-            command=('echo', 'hello'),
+            kind="TOOL",
+            command=("echo", "hello"),
         )
-        assert format_cli_command(action) == 'echo hello'
+        assert format_cli_command(action) == "echo hello"
 
     def test_synthesises_package_command(self) -> None:
         """Verify package actions synthesise installer + package."""
-        action = self._make_action(installer='pip', package='ruff')
-        assert format_cli_command(action) == 'pip install ruff'
+        action = self._make_action(installer="pip", package="ruff")
+        assert format_cli_command(action) == "pip install ruff"
 
     def test_synthesises_default_installer(self) -> None:
         """Verify pip is used as default installer for package actions."""
-        action = self._make_action(installer=None, package='ruff')
-        assert format_cli_command(action) == 'pip install ruff'
+        action = self._make_action(installer=None, package="ruff")
+        assert format_cli_command(action) == "pip install ruff"
 
     def test_description_fallback(self) -> None:
         """Verify description is returned when nothing else is available."""
         action = self._make_action(
-            kind='TOOL',
-            description='Custom step',
+            kind="TOOL",
+            description="Custom step",
             package=None,
         )
-        assert format_cli_command(action) == 'Custom step'
+        assert format_cli_command(action) == "Custom step"
 
 
 class TestInstallWorker:
     """Tests for run_install coroutine."""
 
     @staticmethod
-    def test_worker_emits_finished_on_success() -> None:
-        """Verify coroutine returns results on success."""
-        porringer = MagicMock()
-        manifest_path = Path('/tmp/test/porringer.json')
+    def _plan() -> SyncPlan:
+        return SyncPlan(parameters=SetupParameters(), report=SyncInspectionReport())
 
-        action = MagicMock()
+    def test_worker_returns_results_on_success(self) -> None:
+        """Verify coroutine returns the loaded actions and completed results."""
+        porringer = MagicMock()
+        action = _package_action()
         manifest = SetupResults(actions=[action])
-        manifest_event = ManifestLoadedEvent(manifest=manifest)
-
-        result = MagicMock(spec=SetupActionResult)
-        completed_event = ActionCompletedEvent(
-            action=action,
-            result=result,
-            action_index=0,
+        result = SetupActionResult(action=action, success=True)
+        mock_sync_run(
+            porringer,
+            [
+                ManifestLoadedEvent(manifest=manifest),
+                ActionCompletedEvent(action=action, result=result, action_index=0),
+            ],
         )
 
-        async def mock_stream(*args, **kwargs):
-            yield manifest_event
-            yield completed_event
+        results = asyncio.run(run_install(porringer, self._plan()))
 
-        porringer.sync.execute_stream = mock_stream
+        assert results.actions == [action]
+        assert results.results == [result]
 
-        results = asyncio.run(run_install(porringer, manifest_path))
-
-        assert results.actions == manifest.actions
-
-    @staticmethod
-    def test_worker_emits_error_on_failure() -> None:
-        """Verify coroutine raises on exception."""
+    def test_worker_raises_on_failure(self) -> None:
+        """Verify coroutine re-raises a run error."""
         porringer = MagicMock()
-        manifest_path = Path('/tmp/test/porringer.json')
+        mock_sync_run(porringer, error=RuntimeError("boom"))
 
-        async def mock_stream(*args, **kwargs):
-            if False:
-                yield  # pragma: no cover — establishes async generator protocol
-            msg = 'boom'
-            raise RuntimeError(msg)
+        with pytest.raises(RuntimeError, match="boom"):
+            asyncio.run(run_install(porringer, self._plan()))
 
-        porringer.sync.execute_stream = mock_stream
-
-        with pytest.raises(RuntimeError, match='boom'):
-            asyncio.run(run_install(porringer, manifest_path))
-
-    @staticmethod
-    def test_worker_passes_prerelease_packages() -> None:
-        """Verify prerelease_packages is forwarded to SetupParameters."""
+    def test_worker_runs_the_previewed_plan(self) -> None:
+        """Verify the plan itself is run, not a reloaded manifest."""
         porringer = MagicMock()
-        manifest_path = Path('/tmp/test/porringer.json')
-
-        manifest = SetupResults(actions=[])
-        manifest_event = ManifestLoadedEvent(manifest=manifest)
-
-        captured_params: list[Any] = []
-
-        async def mock_stream(params: Any, **kwargs: Any) -> Any:
-            captured_params.append(params)
-            yield manifest_event
-
-        porringer.sync.execute_stream = mock_stream
-
-        asyncio.run(
-            run_install(
-                porringer,
-                manifest_path,
-                InstallConfig(prerelease_packages={'cppython'}),
-            ),
+        calls = mock_sync_run(
+            porringer, [ManifestLoadedEvent(manifest=SetupResults(actions=[]))]
         )
+        plan = self._plan()
 
-        assert len(captured_params) == 1
-        assert captured_params[0].prerelease_packages == {'cppython'}
+        asyncio.run(run_install(porringer, plan))
 
-    @staticmethod
-    def test_worker_omits_prerelease_when_none() -> None:
-        """Verify prerelease_packages defaults to None."""
-        porringer = MagicMock()
-        manifest_path = Path('/tmp/test/porringer.json')
-
-        manifest = SetupResults(actions=[])
-        manifest_event = ManifestLoadedEvent(manifest=manifest)
-
-        captured_params: list[Any] = []
-
-        async def mock_stream(params: Any, **kwargs: Any) -> Any:
-            captured_params.append(params)
-            yield manifest_event
-
-        porringer.sync.execute_stream = mock_stream
-
-        asyncio.run(run_install(porringer, manifest_path))
-
-        assert len(captured_params) == 1
-        assert captured_params[0].prerelease_packages is None
+        assert calls == [plan]
 
 
 class TestResolveLocalPath:
@@ -244,12 +219,12 @@ class TestResolveLocalPath:
     @staticmethod
     def test_http_url_returns_none() -> None:
         """HTTP URLs should not resolve to a local path."""
-        assert resolve_local_path('https://example.com/porringer.json') is None
+        assert resolve_local_path("https://example.com/porringer.json") is None
 
     @staticmethod
     def test_absolute_path_returns_path(tmp_path: Path) -> None:
         """Absolute OS paths should resolve."""
-        path = str(tmp_path / 'porringer.json')
+        path = str(tmp_path / "porringer.json")
         result = resolve_local_path(path)
         assert result is not None
         assert result == Path(path)
@@ -257,16 +232,16 @@ class TestResolveLocalPath:
     @staticmethod
     def test_file_uri_returns_path() -> None:
         """file:// URIs should resolve to a local path."""
-        result = resolve_local_path('file:///C:/Users/test/porringer.json')
+        result = resolve_local_path("file:///C:/Users/test/porringer.json")
         assert result is not None
-        assert 'porringer.json' in str(result)
+        assert "porringer.json" in str(result)
 
     @staticmethod
     def test_existing_relative_path(tmp_path: Path) -> None:
         """Relative paths that exist on disk should resolve."""
-        manifest = tmp_path / 'porringer.json'
-        manifest.write_text('{}')
-        result = resolve_local_path(str(manifest))
+        manifest_file = tmp_path / "porringer.json"
+        manifest_file.write_text("{}")
+        result = resolve_local_path(str(manifest_file))
         assert result is not None
 
 
@@ -274,44 +249,34 @@ class TestPreviewWorkerLocal:
     """Tests for run_preview with local manifest files."""
 
     @staticmethod
-    def test_local_manifest_skips_download(tmp_path: Path) -> None:
+    def test_local_manifest_skips_download(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Verify run_preview skips download for local files."""
-        manifest = tmp_path / 'porringer.json'
-        manifest.write_text('{}')
+        manifest_file = tmp_path / "porringer.json"
+        manifest_file.write_text("{}")
+        download = AsyncMock()
+        monkeypatch.setattr(_DOWNLOAD_PATCH, download)
 
         porringer = MagicMock()
-        expected = SetupResults(actions=[])
-        manifest_event = ManifestLoadedEvent(manifest=expected)
+        mock_plan(porringer, [loaded(manifest_path=manifest_file)])
 
-        async def mock_stream(*args: Any, **kwargs: Any) -> Any:
-            yield manifest_event
+        events = _collect(porringer, str(manifest_file))
 
-        porringer.sync.execute_stream = mock_stream
-
-        results: list[tuple[object, str, str]] = []
-
-        asyncio.run(
-            run_preview(
-                porringer,
-                str(manifest),
-                on_event=lambda e: (
-                    isinstance(e, PreviewReady) and results.append((e.manifest, e.manifest_path, e.temp_dir))
-                ),
-            ),
-        )
-
-        assert len(results) == 1
-        assert results[0][0] is expected
-        # download should NOT have been called
-        porringer.sync.download.assert_not_called()
+        ready = [e for e in events if isinstance(e, PreviewReady)]
+        assert len(ready) == 1
+        assert ready[0].manifest.actions == []
+        assert ready[0].manifest_path == str(manifest_file)
+        assert not ready[0].temp_dir
+        download.assert_not_called()
 
     @staticmethod
     def test_local_manifest_not_found(tmp_path: Path) -> None:
         """Verify run_preview raises error for missing local file."""
-        path = str(tmp_path / 'nonexistent' / 'porringer.json')
+        path = str(tmp_path / "nonexistent" / "porringer.json")
         porringer = MagicMock()
 
-        with pytest.raises(FileNotFoundError, match='not found'):
+        with pytest.raises(FileNotFoundError, match="not found"):
             asyncio.run(run_preview(porringer, path))
 
 
@@ -323,364 +288,246 @@ class TestPreviewWorker:
         """Verify run_preview raises when download fails."""
         porringer = MagicMock()
 
-        async def _mock_download(params: Any, progress_callback: Any = None) -> DownloadResult:
+        async def _mock_download(
+            params: Any, progress_callback: Any = None
+        ) -> DownloadResult:
             return DownloadResult(
                 success=False,
                 path=None,
                 verified=False,
                 size=0,
-                message='Network error',
+                message="Network error",
             )
 
         monkeypatch.setattr(_DOWNLOAD_PATCH, _mock_download)
 
-        with pytest.raises(RuntimeError, match='Network error'):
-            asyncio.run(run_preview(porringer, 'https://example.com/bad.json'))
+        with pytest.raises(RuntimeError, match="Network error"):
+            asyncio.run(run_preview(porringer, "https://example.com/bad.json"))
 
     @staticmethod
-    def test_emits_preview_ready_on_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """Verify run_preview invokes on_preview_ready with SetupResults."""
+    def test_emits_preview_ready_on_success(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Verify run_preview inspects the downloaded manifest and emits PreviewReady."""
         porringer = MagicMock()
 
-        dest = tmp_path / 'porringer.json'
-        dest.write_text('{}')
-
-        async def _mock_download(params: Any, progress_callback: Any = None) -> DownloadResult:
+        async def _mock_download(
+            params: Any, progress_callback: Any = None
+        ) -> DownloadResult:
+            params.destination.write_text("{}")
             return DownloadResult(
                 success=True,
-                path=dest,
+                path=params.destination,
                 verified=True,
                 size=100,
-                message='OK',
+                message="OK",
             )
 
         monkeypatch.setattr(_DOWNLOAD_PATCH, _mock_download)
+        action = _package_action()
+        calls = mock_plan(porringer, [loaded([action])])
 
-        expected = SetupResults(actions=[])
-        manifest_event = ManifestLoadedEvent(manifest=expected)
+        events = _collect(porringer, "https://example.com/good.json")
 
-        async def mock_stream(*args: Any, **kwargs: Any) -> Any:
-            yield manifest_event
-
-        porringer.sync.execute_stream = mock_stream
-
-        results: list[tuple[object, str, str]] = []
-
-        asyncio.run(
-            run_preview(
-                porringer,
-                'https://example.com/good.json',
-                on_event=lambda e: (
-                    isinstance(e, PreviewReady) and results.append((e.manifest, e.manifest_path, e.temp_dir))
-                ),
-            ),
-        )
-
-        assert len(results) == 1
-        assert results[0][0] is expected
+        ready = [e for e in events if isinstance(e, PreviewReady)]
+        assert len(ready) == 1
+        assert ready[0].manifest.actions == [action]
+        assert ready[0].temp_dir
+        assert calls[0].paths[0] == Path(ready[0].temp_dir) / "porringer.json"
 
 
 class TestPreviewWorkerSignals:
-    """Tests for run_preview callback invocation and dry-run status check."""
+    """Tests for run_preview event emission from the plan's inspection events."""
 
     @staticmethod
-    def test_emits_preview_ready_and_finished(tmp_path: Path) -> None:
-        """Verify coroutine invokes on_preview_ready for a local manifest."""
-        manifest = tmp_path / 'porringer.json'
-        manifest.write_text('{}')
+    def test_emits_preview_ready_and_action_checked(tmp_path: Path) -> None:
+        """Verify the loaded manifest lists actions and each check reports status."""
+        manifest_file = tmp_path / "porringer.json"
+        manifest_file.write_text("{}")
+        action = _package_action()
 
         porringer = MagicMock()
-        action = MagicMock()
-        action.kind = PluginKind.PACKAGE
-        preview = SetupResults(actions=[action])
-
-        # Dry-run stream yields manifest loaded then one completed event
-        manifest_event = ManifestLoadedEvent(manifest=preview)
-        result = SetupActionResult(action=action, success=True, skipped=False, skip_reason=None)
-        completed_event = ActionCompletedEvent(
-            action=action,
-            result=result,
-            action_index=0,
+        mock_plan(
+            porringer,
+            [loaded([action]), checked(action, status=InspectionStatus.NEEDED)],
         )
 
-        async def mock_stream(*args: Any, **kwargs: Any) -> Any:
-            yield manifest_event
-            yield completed_event
+        events = _collect(porringer, str(manifest_file))
 
-        porringer.sync.execute_stream = mock_stream
-
-        ready_calls: list[tuple[object, str, str]] = []
-        checked: list[tuple[int, SetupActionResult, str]] = []
-        finished = False
-
-        async def _run() -> None:
-            nonlocal finished
-            await run_preview(
-                porringer,
-                str(manifest),
-                on_event=lambda e: (
-                    (isinstance(e, PreviewReady) and ready_calls.append((e.manifest, e.manifest_path, e.temp_dir)))
-                    or (isinstance(e, PreviewActionChecked) and checked.append((e.index, e.result, e.status)))
-                ),
-            )
-            finished = True
-
-        asyncio.run(_run())
-
-        assert len(ready_calls) == 1
-        assert ready_calls[0][0] is preview
-        assert len(checked) == 1
-        assert checked[0][:2] == (0, result)
-        assert finished
+        ready = [e for e in events if isinstance(e, PreviewReady)]
+        results = [e for e in events if isinstance(e, PreviewActionChecked)]
+        assert len(ready) == 1
+        assert ready[0].manifest.actions == [action]
+        assert len(results) == 1
+        assert results[0].index == 0
+        assert results[0].result.action is action
+        assert results[0].result.success is True
+        assert results[0].status == "Needed"
 
     @staticmethod
-    def test_emits_finished_for_empty_actions(tmp_path: Path) -> None:
+    def test_completes_for_empty_actions(tmp_path: Path) -> None:
         """Verify coroutine completes normally with no actions."""
-        manifest = tmp_path / 'porringer.json'
-        manifest.write_text('{}')
+        manifest_file = tmp_path / "porringer.json"
+        manifest_file.write_text("{}")
 
         porringer = MagicMock()
-        preview = SetupResults(actions=[])
-        manifest_event = ManifestLoadedEvent(manifest=preview)
+        mock_plan(porringer, [loaded()])
 
-        async def mock_stream(*args: Any, **kwargs: Any) -> Any:
-            yield manifest_event
+        events = _collect(porringer, str(manifest_file))
 
-        porringer.sync.execute_stream = mock_stream
-
-        finished = False
-
-        async def _run() -> None:
-            nonlocal finished
-            await run_preview(porringer, str(manifest))
-            finished = True
-
-        asyncio.run(_run())
-        assert finished
+        assert not [e for e in events if isinstance(e, PreviewActionChecked)]
+        assert [e for e in events if isinstance(e, PreviewReady)]
 
     @staticmethod
-    def test_action_checked_maps_correct_rows(tmp_path: Path) -> None:
-        """Verify on_action_checked receives correct row indices via content-based matching."""
-        manifest = tmp_path / 'porringer.json'
-        manifest.write_text('{}')
+    def test_action_checked_maps_rows_by_action_index(tmp_path: Path) -> None:
+        """Verify each checked result carries its own action's row index, in completion order."""
+        manifest_file = tmp_path / "porringer.json"
+        manifest_file.write_text("{}")
+        action_a = _package_action("python", kind=PluginKind.RUNTIME, installer="pim")
+        action_b = _package_action("requests")
 
         porringer = MagicMock()
-        action_a = MagicMock()
-        action_a.kind = PluginKind.RUNTIME
-        action_b = MagicMock()
-        action_b.kind = PluginKind.PACKAGE
-        preview = SetupResults(actions=[action_a, action_b])
-
-        manifest_event = ManifestLoadedEvent(manifest=preview)
-        result_b = SetupActionResult(
-            action=action_b, success=True, skipped=True, skip_reason=SkipReason.ALREADY_INSTALLED
-        )
-        result_a = SetupActionResult(action=action_a, success=True, skipped=False, skip_reason=None)
-
-        # Stream returns in execution order (b before a), not preview order
-        event_b = ActionCompletedEvent(
-            action=action_b,
-            result=result_b,
-            action_index=1,
-        )
-        event_a = ActionCompletedEvent(
-            action=action_a,
-            result=result_a,
-            action_index=0,
-        )
-
-        async def mock_stream(*args: Any, **kwargs: Any) -> Any:
-            yield manifest_event
-            yield event_b
-            yield event_a
-
-        porringer.sync.execute_stream = mock_stream
-
-        checked: list[tuple[int, SetupActionResult, str]] = []
-
-        asyncio.run(
-            run_preview(
-                porringer,
-                str(manifest),
-                on_event=lambda e: (
-                    isinstance(e, PreviewActionChecked) and checked.append((e.index, e.result, e.status))
+        mock_plan(
+            porringer,
+            [
+                loaded([action_a, action_b]),
+                checked(
+                    action_b,
+                    index=1,
+                    status=InspectionStatus.SATISFIED,
+                    skipped=True,
+                    skip_reason=SkipReason.ALREADY_INSTALLED,
                 ),
-            ),
+                checked(action_a, index=0, status=InspectionStatus.NEEDED),
+            ],
         )
 
-        assert len(checked) == _EXPECTED_CHECKED_COUNT
-        # action_b is at index 1 in preview, action_a at index 0
-        assert checked[0][:2] == (1, result_b)
-        assert checked[1][:2] == (0, result_a)
+        results = [
+            e
+            for e in _collect(porringer, str(manifest_file))
+            if isinstance(e, PreviewActionChecked)
+        ]
+
+        assert len(results) == _EXPECTED_CHECKED_COUNT
+        assert [(e.index, e.result.action, e.status) for e in results] == [
+            (1, action_b, "Already installed"),
+            (0, action_a, "Needed"),
+        ]
 
     @staticmethod
-    def test_emits_error_when_dry_run_fails(tmp_path: Path) -> None:
-        """Verify coroutine raises when dry-run fails."""
-        manifest = tmp_path / 'porringer.json'
-        manifest.write_text('{}')
+    def test_raises_when_planning_fails(tmp_path: Path) -> None:
+        """Verify coroutine raises when planning fails."""
+        manifest_file = tmp_path / "porringer.json"
+        manifest_file.write_text("{}")
 
         porringer = MagicMock()
+        porringer.discover_plugins = AsyncMock(return_value=MagicMock())
+        porringer.sync.plan = AsyncMock(side_effect=RuntimeError("plan boom"))
 
-        async def mock_stream(*args: Any, **kwargs: Any) -> Any:
-            if False:
-                yield  # pragma: no cover — establishes async generator protocol
-            msg = 'dry-run boom'
-            raise RuntimeError(msg)
-
-        porringer.sync.execute_stream = mock_stream
-
-        with pytest.raises(RuntimeError, match='dry-run boom'):
-            asyncio.run(run_preview(porringer, str(manifest)))
+        with pytest.raises(RuntimeError, match="plan boom"):
+            asyncio.run(run_preview(porringer, str(manifest_file)))
 
     @staticmethod
     def test_emits_plugins_queried(tmp_path: Path) -> None:
-        """Verify on_plugins_queried is invoked with plugin presence mapping."""
-        manifest = tmp_path / 'porringer.json'
-        manifest.write_text('{}')
+        """Verify plugin availability and capabilities come from the plugins event."""
+        manifest_file = tmp_path / "porringer.json"
+        manifest_file.write_text("{}")
 
         porringer = MagicMock()
-
-        preview = SetupResults(actions=[])
-        plugins_event = PluginsDiscoveredEvent(
-            discovered_plugins=(
-                DiscoveredPluginEntry(name='pip', available=True, capabilities=frozenset(), kind=PluginKind.PACKAGE),
-                DiscoveredPluginEntry(name='uv', available=False, capabilities=frozenset(), kind=PluginKind.PACKAGE),
-            ),
-        )
-        manifest_event = ManifestLoadedEvent(manifest=preview)
-
-        async def mock_stream(*args: Any, **kwargs: Any) -> Any:
-            yield plugins_event
-            yield manifest_event
-
-        porringer.sync.execute_stream = mock_stream
-
-        captured: list[tuple[dict[str, bool], dict[str, frozenset]]] = []
-
-        asyncio.run(
-            run_preview(
-                porringer,
-                str(manifest),
-                on_event=lambda e: (
-                    isinstance(e, PreviewPluginsQueried) and captured.append((e.availability, e.capabilities))
+        mock_plan(
+            porringer,
+            [
+                PluginsDiscoveredEvent(
+                    discovered_plugins=(
+                        plugin_entry(
+                            "pip", capabilities=[PluginCapability.RUNTIME_CONSUMER]
+                        ),
+                        plugin_entry("uv", available=False),
+                    )
                 ),
-            ),
+                loaded(),
+            ],
         )
 
-        assert len(captured) == 1
-        assert captured[0][0] == {'pip': True, 'uv': False}
+        queried = [
+            e
+            for e in _collect(porringer, str(manifest_file))
+            if isinstance(e, PreviewPluginsQueried)
+        ]
+
+        assert len(queried) == 1
+        assert queried[0].availability == {"pip": True, "uv": False}
+        assert queried[0].capabilities == {
+            "pip": frozenset({PluginCapability.RUNTIME_CONSUMER}),
+            "uv": frozenset(),
+        }
 
     @staticmethod
-    def test_plugins_queried_emitted_before_preview_ready(tmp_path: Path) -> None:
-        """Verify on_plugins_queried fires before on_preview_ready."""
-        manifest = tmp_path / 'porringer.json'
-        manifest.write_text('{}')
+    def test_emits_manifest_parsed_with_metadata(tmp_path: Path) -> None:
+        """Verify PreviewManifestParsed carries the manifest metadata."""
+        manifest_file = tmp_path / "porringer.json"
+        manifest_file.write_text("{}")
 
         porringer = MagicMock()
-
-        preview = SetupResults(actions=[])
-        plugins_event = PluginsDiscoveredEvent(
-            discovered_plugins=(),
-        )
-        manifest_event = ManifestLoadedEvent(manifest=preview)
-
-        async def mock_stream(*args: Any, **kwargs: Any) -> Any:
-            yield plugins_event
-            yield manifest_event
-
-        porringer.sync.execute_stream = mock_stream
-
-        order: list[str] = []
-
-        asyncio.run(
-            run_preview(
-                porringer,
-                str(manifest),
-                on_event=lambda e: (
-                    (isinstance(e, PreviewPluginsQueried) and order.append('plugins'))
-                    or (isinstance(e, PreviewReady) and order.append('preview'))
-                ),
-            ),
+        mock_plan(
+            porringer,
+            [loaded(manifest_path=manifest_file, name="Demo", description="A demo")],
         )
 
-        assert order == ['plugins', 'preview']
+        parsed = [
+            e
+            for e in _collect(porringer, str(manifest_file))
+            if isinstance(e, PreviewManifestParsed)
+        ]
+
+        assert len(parsed) == 1
+        assert parsed[0].manifest.metadata is not None
+        assert parsed[0].manifest.metadata.name == "Demo"
+        assert parsed[0].manifest_path == str(manifest_file)
 
     @staticmethod
-    def test_emits_manifest_parsed(tmp_path: Path) -> None:
-        """Verify on_manifest_parsed is invoked from MANIFEST_PARSED events."""
-        manifest = tmp_path / 'porringer.json'
-        manifest.write_text('{}')
+    def test_event_order(tmp_path: Path) -> None:
+        """Verify the event order: plugins, parsed, ready, checked, then the plan."""
+        manifest_file = tmp_path / "porringer.json"
+        manifest_file.write_text("{}")
+        action = _package_action()
 
         porringer = MagicMock()
-
-        preview = SetupResults(actions=[])
-        parsed_event = ManifestParsedEvent(
-            manifest=preview,
-        )
-        loaded_event = ManifestLoadedEvent(manifest=preview)
-
-        async def mock_stream(*args: Any, **kwargs: Any) -> Any:
-            yield parsed_event
-            yield loaded_event
-
-        porringer.sync.execute_stream = mock_stream
-
-        parsed_data: list[Any] = []
-
-        asyncio.run(
-            run_preview(
-                porringer,
-                str(manifest),
-                on_event=lambda e: (
-                    isinstance(e, PreviewManifestParsed)
-                    and parsed_data.append((e.manifest, e.manifest_path, e.temp_dir))
-                ),
-            ),
+        mock_plan(
+            porringer,
+            [
+                PluginsDiscoveredEvent(discovered_plugins=(plugin_entry("pip"),)),
+                loaded([action]),
+                checked(action),
+            ],
         )
 
-        assert len(parsed_data) == 1
+        order = [type(e).__name__ for e in _collect(porringer, str(manifest_file))]
+
+        assert order == [
+            "PreviewPluginsQueried",
+            "PreviewManifestParsed",
+            "PreviewReady",
+            "PreviewActionChecked",
+            "PreviewPlanned",
+        ]
 
     @staticmethod
-    def test_two_phase_signal_order(tmp_path: Path) -> None:
-        """Verify the full two-phase callback order: parsed → plugins → ready."""
-        manifest = tmp_path / 'porringer.json'
-        manifest.write_text('{}')
+    def test_plans_once_with_complete_inspection(tmp_path: Path) -> None:
+        """Verify the preview is a single complete plan, handed over at the end."""
+        manifest_file = tmp_path / "porringer.json"
+        manifest_file.write_text("{}")
+        action = _package_action()
 
         porringer = MagicMock()
+        calls = mock_plan(porringer, [loaded([action])])
 
-        preview = SetupResults(actions=[])
-        parsed_event = ManifestParsedEvent(
-            manifest=preview,
-        )
-        plugins_event = PluginsDiscoveredEvent(
-            discovered_plugins=(
-                DiscoveredPluginEntry(name='pip', available=True, capabilities=frozenset(), kind=PluginKind.PACKAGE),
-            ),
-        )
-        loaded_event = ManifestLoadedEvent(manifest=preview)
+        events = _collect(porringer, str(manifest_file))
 
-        async def mock_stream(*args: Any, **kwargs: Any) -> Any:
-            yield parsed_event
-            yield plugins_event
-            yield loaded_event
-
-        porringer.sync.execute_stream = mock_stream
-
-        order: list[str] = []
-
-        asyncio.run(
-            run_preview(
-                porringer,
-                str(manifest),
-                on_event=lambda e: (
-                    (isinstance(e, PreviewManifestParsed) and order.append('parsed'))
-                    or (isinstance(e, PreviewPluginsQueried) and order.append('plugins'))
-                    or (isinstance(e, PreviewReady) and order.append('ready'))
-                ),
-            ),
-        )
-
-        assert order == ['parsed', 'plugins', 'ready']
+        assert [c.inspection_mode for c in calls] == [InspectionMode.COMPLETE]
+        planned = events[-1]
+        assert isinstance(planned, PreviewPlanned)
+        assert planned.plan.manifests[0].actions == [action]
 
 
 class TestPreviewWorkerPrerelease:
@@ -689,56 +536,36 @@ class TestPreviewWorkerPrerelease:
     @staticmethod
     def test_passes_prerelease_packages(tmp_path: Path) -> None:
         """Verify prerelease_packages are forwarded to SetupParameters."""
-        manifest = tmp_path / 'porringer.json'
-        manifest.write_text('{}')
+        manifest_file = tmp_path / "porringer.json"
+        manifest_file.write_text("{}")
 
         porringer = MagicMock()
-        preview = SetupResults(actions=[])
-        manifest_event = ManifestLoadedEvent(manifest=preview)
-
-        captured_params: list[Any] = []
-
-        async def mock_stream(params: Any, **kwargs: Any) -> Any:
-            captured_params.append(params)
-            yield manifest_event
-
-        porringer.sync.execute_stream = mock_stream
+        calls = mock_plan(porringer, [loaded()])
 
         asyncio.run(
             run_preview(
                 porringer,
-                str(manifest),
-                config=PreviewConfig(
-                    prerelease_packages={'some-pkg'},
-                ),
+                str(manifest_file),
+                config=PreviewConfig(prerelease_packages={"some-pkg"}),
             ),
         )
 
-        assert len(captured_params) == 1
-        assert captured_params[0].prerelease_packages == {'some-pkg'}
+        assert calls
+        assert all(c.prerelease_packages == {"some-pkg"} for c in calls)
 
     @staticmethod
     def test_defaults_prerelease_none(tmp_path: Path) -> None:
         """Verify prerelease_packages defaults to None."""
-        manifest = tmp_path / 'porringer.json'
-        manifest.write_text('{}')
+        manifest_file = tmp_path / "porringer.json"
+        manifest_file.write_text("{}")
 
         porringer = MagicMock()
-        preview = SetupResults(actions=[])
-        manifest_event = ManifestLoadedEvent(manifest=preview)
+        calls = mock_plan(porringer, [loaded()])
 
-        captured_params: list[Any] = []
+        asyncio.run(run_preview(porringer, str(manifest_file)))
 
-        async def mock_stream(params: Any, **kwargs: Any) -> Any:
-            captured_params.append(params)
-            yield manifest_event
-
-        porringer.sync.execute_stream = mock_stream
-
-        asyncio.run(run_preview(porringer, str(manifest)))
-
-        assert len(captured_params) == 1
-        assert captured_params[0].prerelease_packages is None
+        assert calls
+        assert all(c.prerelease_packages is None for c in calls)
 
 
 class TestNormalizeManifestKey:
@@ -747,71 +574,53 @@ class TestNormalizeManifestKey:
     @staticmethod
     def test_http_url_passthrough() -> None:
         """HTTP URLs are returned unchanged."""
-        url = 'https://example.com/porringer.json'
+        url = "https://example.com/porringer.json"
         assert normalize_manifest_key(url) == url
 
     @staticmethod
     def test_local_path_resolved(tmp_path: Path) -> None:
         """Local paths are resolved to absolute form."""
-        result = normalize_manifest_key(str(tmp_path / 'manifest'))
+        result = normalize_manifest_key(str(tmp_path / "manifest"))
         assert Path(result).is_absolute()
 
     @staticmethod
     def test_relative_path_resolved() -> None:
         """Relative paths are resolved relative to cwd."""
-        result = normalize_manifest_key('some/relative/path')
+        result = normalize_manifest_key("some/relative/path")
         assert Path(result).is_absolute()
 
 
 class TestPreviewWorkerProjectDirectory:
-    """Tests for project_directory forwarding to the dry-run."""
+    """Tests for project_directory forwarding to the inspection."""
 
     @staticmethod
     def test_file_path_forwards_parent_as_project_directory(tmp_path: Path) -> None:
         """When a manifest *file* is selected, its parent dir is forwarded."""
-        manifest = tmp_path / 'porringer.json'
-        manifest.write_text('{}')
+        manifest_file = tmp_path / "porringer.json"
+        manifest_file.write_text("{}")
 
         porringer = MagicMock()
-        preview = SetupResults(actions=[])
-        manifest_event = ManifestLoadedEvent(manifest=preview)
-
-        captured_params: list[Any] = []
-
-        async def mock_stream(params: Any, **kwargs: Any) -> Any:
-            captured_params.append(params)
-            yield manifest_event
-
-        porringer.sync.execute_stream = mock_stream
+        calls = mock_plan(porringer, [loaded()])
 
         asyncio.run(
             run_preview(
                 porringer,
-                str(manifest),
-                config=PreviewConfig(project_directory=manifest.parent),
+                str(manifest_file),
+                config=PreviewConfig(project_directory=manifest_file.parent),
             ),
         )
 
-        assert len(captured_params) == 1
-        assert captured_params[0].project_directory == tmp_path
+        assert calls
+        assert all(c.project_directory == tmp_path for c in calls)
 
     @staticmethod
     def test_directory_path_forwarded_directly(tmp_path: Path) -> None:
         """When a directory is selected its path is forwarded as-is."""
-        manifest = tmp_path / 'porringer.json'
-        manifest.write_text('{}')
+        manifest_file = tmp_path / "porringer.json"
+        manifest_file.write_text("{}")
 
         porringer = MagicMock()
-        preview = SetupResults(actions=[])
-        manifest_event = ManifestLoadedEvent(manifest=preview)
-
-        captured_params: list[Any] = []
-
-        async def mock_stream(params: Any, **kwargs: Any) -> Any:
-            captured_params.append(params)
-            yield manifest_event
-
-        porringer.sync.execute_stream = mock_stream
+        calls = mock_plan(porringer, [loaded()])
 
         asyncio.run(
             run_preview(
@@ -821,110 +630,74 @@ class TestPreviewWorkerProjectDirectory:
             ),
         )
 
-        assert len(captured_params) == 1
-        assert captured_params[0].project_directory == tmp_path
+        assert calls
+        assert all(c.project_directory == tmp_path for c in calls)
 
 
 class TestSCMPreviewActions:
-    """Tests for SCM (git clone) actions in the preview dry-run flow."""
+    """Tests for SCM (git clone) actions in the preview inspection flow."""
 
     @staticmethod
-    def _make_scm_action(description: str = 'Clone repo') -> MagicMock:
-        action = MagicMock()
-        action.kind = PluginKind.SCM
-        action.description = description
-        action.installer = 'git'
-        action.package = None
-        action.command = None
-        return action
-
-    def test_scm_already_installed_emits_correct_result(self, tmp_path: Path) -> None:
-        """An SCM action with ALREADY_INSTALLED is surfaced via on_action_checked."""
-        manifest = tmp_path / 'porringer.json'
-        manifest.write_text('{}')
+    def test_scm_already_installed_emits_correct_result(tmp_path: Path) -> None:
+        """An SCM action with ALREADY_INSTALLED is surfaced as checked."""
+        manifest_file = tmp_path / "porringer.json"
+        manifest_file.write_text("{}")
+        action = _scm_action()
 
         porringer = MagicMock()
-        action = self._make_scm_action()
-        preview = SetupResults(actions=[action])
-
-        manifest_event = ManifestLoadedEvent(manifest=preview)
-        result = SetupActionResult(
-            action=action,
-            success=True,
-            skipped=True,
-            skip_reason=SkipReason.ALREADY_INSTALLED,
-        )
-        completed_event = ActionCompletedEvent(
-            action=action,
-            result=result,
-            action_index=0,
-        )
-
-        async def mock_stream(*args: Any, **kwargs: Any) -> Any:
-            yield manifest_event
-            yield completed_event
-
-        porringer.sync.execute_stream = mock_stream
-
-        checked: list[tuple[int, SetupActionResult, str]] = []
-
-        asyncio.run(
-            run_preview(
-                porringer,
-                str(manifest),
-                config=PreviewConfig(project_directory=tmp_path),
-                on_event=lambda e: (
-                    isinstance(e, PreviewActionChecked) and checked.append((e.index, e.result, e.status))
+        mock_plan(
+            porringer,
+            [
+                loaded([action]),
+                checked(
+                    action,
+                    status=InspectionStatus.SATISFIED,
+                    skipped=True,
+                    skip_reason=SkipReason.ALREADY_INSTALLED,
                 ),
-            ),
+            ],
         )
 
-        assert len(checked) == 1
-        assert checked[0][:2] == (0, result)
-        assert checked[0][1].skipped is True
-        assert checked[0][1].skip_reason == SkipReason.ALREADY_INSTALLED
+        results = [
+            e
+            for e in _collect(
+                porringer,
+                str(manifest_file),
+                config=PreviewConfig(project_directory=tmp_path),
+            )
+            if isinstance(e, PreviewActionChecked)
+        ]
 
-    def test_scm_needed_emits_correct_result(self, tmp_path: Path) -> None:
+        assert len(results) == 1
+        assert results[0].index == 0
+        assert results[0].result.action == action
+        assert results[0].result.skipped is True
+        assert results[0].result.skip_reason == SkipReason.ALREADY_INSTALLED
+
+    @staticmethod
+    def test_scm_needed_emits_correct_result(tmp_path: Path) -> None:
         """An SCM action that is *not* installed is surfaced as Needed."""
-        manifest = tmp_path / 'porringer.json'
-        manifest.write_text('{}')
+        manifest_file = tmp_path / "porringer.json"
+        manifest_file.write_text("{}")
+        action = _scm_action()
 
         porringer = MagicMock()
-        action = self._make_scm_action()
-        preview = SetupResults(actions=[action])
-
-        manifest_event = ManifestLoadedEvent(manifest=preview)
-        result = SetupActionResult(
-            action=action,
-            success=True,
-            skipped=False,
-            skip_reason=None,
-        )
-        completed_event = ActionCompletedEvent(
-            action=action,
-            result=result,
-            action_index=0,
+        mock_plan(
+            porringer,
+            [loaded([action]), checked(action, status=InspectionStatus.NEEDED)],
         )
 
-        async def mock_stream(*args: Any, **kwargs: Any) -> Any:
-            yield manifest_event
-            yield completed_event
-
-        porringer.sync.execute_stream = mock_stream
-
-        checked: list[tuple[int, SetupActionResult, str]] = []
-
-        asyncio.run(
-            run_preview(
+        results = [
+            e
+            for e in _collect(
                 porringer,
-                str(manifest),
+                str(manifest_file),
                 config=PreviewConfig(project_directory=tmp_path),
-                on_event=lambda e: (
-                    isinstance(e, PreviewActionChecked) and checked.append((e.index, e.result, e.status))
-                ),
-            ),
-        )
+            )
+            if isinstance(e, PreviewActionChecked)
+        ]
 
-        assert len(checked) == 1
-        assert checked[0][1].skipped is False
-        assert checked[0][1].skip_reason is None
+        assert len(results) == 1
+        assert results[0].result.skipped is False
+        assert results[0].result.skip_reason is None
+        assert results[0].status == "Needed"

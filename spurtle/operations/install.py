@@ -7,7 +7,6 @@ No Qt, no signals — progress is reported via streaming async iterators.
 from __future__ import annotations
 
 import logging
-import os
 import tempfile
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -16,26 +15,31 @@ from typing import TYPE_CHECKING
 
 from porringer.schema import (
     ActionCompletedEvent,
+    ActionInspectedEvent,
+    ActionProgressEvent,
     ActionStartedEvent,
     DownloadParameters,
+    InspectionMode,
+    ManifestFailedEvent,
     ManifestLoadedEvent,
-    ManifestParsedEvent,
     PluginsDiscoveredEvent,
     ProgressEvent,
     SetupAction,
     SetupActionResult,
     SetupParameters,
     SetupResults,
-    SubActionProgressEvent,
+    SyncPlan,
     SyncStrategy,
 )
 
 from spurtle.application.uri import resolve_local_path, safe_rmtree
+from spurtle.operations.inspection import EventStream, run_events
 from spurtle.operations.schema import (
     ActionInfo,
     PreviewActionChecked,
     PreviewEvent,
     PreviewManifestParsed,
+    PreviewPlanned,
     PreviewPluginsQueried,
     PreviewReady,
     PreviewResult,
@@ -64,8 +68,8 @@ def validate_profile_url(url: str) -> None:
     from urllib.parse import urlparse
 
     parsed = urlparse(url)
-    if parsed.scheme != 'https':
-        msg = f'Only HTTPS URLs are allowed for profiles and manifests, got: {url}'
+    if parsed.scheme != "https":
+        msg = f"Only HTTPS URLs are allowed for profiles and manifests, got: {url}"
         raise ValueError(msg)
 
 
@@ -91,19 +95,19 @@ async def resolve_manifest_path(url: str) -> tuple[Path, str | None]:
 
     if local_path is not None:
         if not local_path.exists():
-            msg = f'Manifest not found:\n{local_path}'
+            msg = f"Manifest not found:\n{local_path}"
             raise FileNotFoundError(msg)
         return local_path, None
 
-    temp_dir = tempfile.mkdtemp(prefix='spurtle_install_')
-    dest = Path(temp_dir) / 'porringer.json'
+    temp_dir = tempfile.mkdtemp(prefix="spurtle_install_")
+    dest = Path(temp_dir) / "porringer.json"
 
     params = DownloadParameters(url=url, destination=dest, timeout=3)
     result = await _API.download(params)
 
     if not result.success:
         safe_rmtree(temp_dir)
-        msg = f'Failed to download manifest:\n{result.message}'
+        msg = f"Failed to download manifest:\n{result.message}"
         raise RuntimeError(msg)
 
     return dest, temp_dir
@@ -132,23 +136,23 @@ async def resolve_profile(url: str) -> tuple[SetupProfile, str | None]:
 
     validate_profile_url(url)
 
-    temp_dir = tempfile.mkdtemp(prefix='spurtle_profile_')
-    dest = Path(temp_dir) / 'profile.json'
+    temp_dir = tempfile.mkdtemp(prefix="spurtle_profile_")
+    dest = Path(temp_dir) / "profile.json"
 
     params = DownloadParameters(url=url, destination=dest, timeout=3)
     result = await _API.download(params)
 
     if not result.success:
         safe_rmtree(temp_dir)
-        msg = f'Failed to download profile:\n{result.message}'
+        msg = f"Failed to download profile:\n{result.message}"
         raise RuntimeError(msg)
 
     try:
-        data = json.loads(dest.read_text(encoding='utf-8'))
+        data = json.loads(dest.read_text(encoding="utf-8"))
         profile = SetupProfile.model_validate(data)
     except Exception as exc:
         safe_rmtree(temp_dir)
-        msg = f'Failed to parse profile from {url}'
+        msg = f"Failed to parse profile from {url}"
         raise RuntimeError(msg) from exc
 
     for manifest_url in profile.manifests:
@@ -214,11 +218,13 @@ async def preview_manifest_stream(
     discovered: DiscoveredPlugins | None = None,
     resolve: bool = True,
 ) -> AsyncIterator[PreviewEvent]:
-    """Stream dry-run preview events for a manifest.
+    """Stream preview events for a manifest.
 
-    Resolves the manifest (downloading if remote), then runs
-    ``execute_stream`` with ``dry_run=True``.  Each porringer event
-    is translated into a :data:`PreviewEvent` and yielded.
+    Resolves the manifest (downloading if remote), then plans it with
+    Porringer: the actions are listed as soon as the manifest loads, and
+    each action's status follows as its check finishes.  The final
+    :class:`PreviewPlanned` carries the plan, which an install runs
+    as previewed.
 
     Per-action results include a pre-resolved ``status`` string
     via :func:`resolve_action_status`.
@@ -244,52 +250,71 @@ async def preview_manifest_stream(
         manifest_path = resolve_local_path(url)
 
     manifest_path_str = str(manifest_path) if manifest_path is not None else url
-    temp_dir_str = temp_dir or ''
+    temp_dir_str = temp_dir or ""
 
     try:
         params = SetupParameters(
             paths=[manifest_path or url],
-            dry_run=True,
             project_directory=project_directory,
             prerelease_packages=prerelease_packages,
         )
+        plugins = (
+            discovered if discovered is not None else await porringer.discover_plugins()
+        )
+        stream = EventStream(
+            lambda on_event: porringer.sync.plan(
+                params, plugins=plugins, on_event=on_event
+            )
+        )
 
-        async for event in porringer.sync.execute_stream(params, plugins=discovered):
-            if isinstance(event, ManifestParsedEvent):
+        failure: str | None = None
+        manifest_index: int | None = None
+        async for event in stream.events():
+            if isinstance(event, PluginsDiscoveredEvent):
+                yield PreviewPluginsQueried(
+                    availability={
+                        entry.name: entry.available
+                        for entry in event.discovered_plugins
+                    },
+                    capabilities={
+                        entry.name: entry.capabilities
+                        for entry in event.discovered_plugins
+                    },
+                )
+            elif isinstance(event, ManifestFailedEvent):
+                failure = failure or event.failed_path[1]
+            elif isinstance(event, ManifestLoadedEvent) and manifest_index is None:
+                manifest_index = event.manifest_index
+                loaded = event.manifest
                 effective_path = (
-                    str(event.manifest.manifest_path) if event.manifest.manifest_path is not None else manifest_path_str
+                    str(loaded.manifest_path)
+                    if loaded.manifest_path is not None
+                    else manifest_path_str
                 )
                 yield PreviewManifestParsed(
-                    manifest=event.manifest,
-                    manifest_path=effective_path,
-                    temp_dir=temp_dir_str,
-                )
-
-            elif isinstance(event, PluginsDiscoveredEvent):
-                availability = {entry.name: entry.available for entry in event.discovered_plugins}
-                capabilities = {entry.name: entry.capabilities for entry in event.discovered_plugins}
-                yield PreviewPluginsQueried(
-                    availability=availability,
-                    capabilities=capabilities,
-                )
-
-            elif isinstance(event, ManifestLoadedEvent):
-                effective_path = (
-                    str(event.manifest.manifest_path) if event.manifest.manifest_path is not None else manifest_path_str
+                    manifest=loaded, manifest_path=effective_path, temp_dir=temp_dir_str
                 )
                 yield PreviewReady(
-                    manifest=event.manifest,
-                    manifest_path=effective_path,
-                    temp_dir=temp_dir_str,
+                    manifest=loaded, manifest_path=effective_path, temp_dir=temp_dir_str
+                )
+            elif (
+                isinstance(event, ActionInspectedEvent)
+                and event.inspection.manifest_index == manifest_index
+            ):
+                yield PreviewActionChecked(
+                    index=event.inspection.index,
+                    result=event.result,
+                    status=resolve_action_status(event.result, event.action),
                 )
 
-            elif isinstance(event, ActionCompletedEvent) and event.action_index is not None:
-                status = resolve_action_status(event.result, event.action)
-                yield PreviewActionChecked(
-                    index=event.action_index,
-                    result=event.result,
-                    status=status,
-                )
+        plan = stream.result
+        if manifest_index is None or plan is None:
+            if plan is not None:
+                plan.discard()
+            if failure is not None:
+                raise RuntimeError(failure)
+            return
+        yield PreviewPlanned(plan=plan)
 
     except BaseException:
         if temp_dir:
@@ -316,8 +341,8 @@ async def preview_manifest(
     :class:`PreviewResult` with all resolved actions.
     """
     actions: list[ActionInfo] = []
-    project_name = ''
-    description = ''
+    project_name = ""
+    description = ""
     manifest_key = url
 
     async for event in preview_manifest_stream(
@@ -331,8 +356,8 @@ async def preview_manifest(
         if isinstance(event, PreviewManifestParsed):
             meta = event.manifest.metadata
             if meta:
-                project_name = meta.name or ''
-                description = meta.description or ''
+                project_name = meta.name or ""
+                description = meta.description or ""
             manifest_key = str(event.manifest.manifest_path or url)
 
         elif isinstance(event, PreviewReady):
@@ -344,9 +369,11 @@ async def preview_manifest(
                         package=str(act.package.name) if act.package else None,
                         constraint=act.package.constraint if act.package else None,
                         installer=act.installer,
-                        distro=act.distro,
                     )
                 )
+
+        elif isinstance(event, PreviewPlanned):
+            event.plan.discard()
 
     return PreviewResult(
         manifest_key=manifest_key,
@@ -363,13 +390,13 @@ async def preview_manifest(
 
 async def execute_install(
     porringer: API,
-    manifest_path: Path,
+    manifest_path: Path | None = None,
     *,
+    plan: SyncPlan | None = None,
     project_directory: Path | None = None,
     strategy: SyncStrategy = SyncStrategy.MINIMAL,
     prerelease_packages: set[str] | None = None,
     discovered: DiscoveredPlugins | None = None,
-    exclude_post_sync: bool = False,
 ) -> AsyncIterator[tuple[str, ProgressEvent]]:
     """Execute setup actions and yield ``(stage, event)`` tuples.
 
@@ -379,89 +406,36 @@ async def execute_install(
 
     Args:
         porringer: The porringer API instance.
-        manifest_path: Path to the manifest file.
+        manifest_path: Path to the manifest file, loaded afresh.
+        plan: A previewed plan to run instead of *manifest_path*; the
+            remaining options are the plan's own.
         project_directory: Optional project directory override.
         strategy: Sync strategy (MINIMAL, LATEST, EXACT).
         prerelease_packages: Optional prerelease overrides.
         discovered: Pre-discovered plugins.
-        exclude_post_sync: When ``True``, post-sync commands are
-            stripped from the manifest before execution.  Use this
-            when post-sync is handled separately via
-            :func:`execute_post_sync`.
     """
-    effective_path = manifest_path
-
-    if exclude_post_sync:
-        effective_path = _strip_post_sync(manifest_path)
-
-    try:
+    if plan is not None:
+        events = run_events(porringer, plan=plan, plugins=discovered)
+    else:
         params = SetupParameters(
-            paths=[effective_path],
+            paths=[manifest_path] if manifest_path is not None else None,
             project_directory=project_directory,
             strategy=strategy,
             prerelease_packages=prerelease_packages,
         )
+        events = run_events(porringer, params, plugins=discovered)
 
-        async for event in porringer.sync.execute_stream(params, plugins=discovered):
-            if isinstance(event, ManifestLoadedEvent):
-                yield ('manifest_loaded', event)
-            elif isinstance(event, ActionStartedEvent):
-                yield ('action_started', event)
-            elif isinstance(event, SubActionProgressEvent):
-                yield ('sub_progress', event)
-            elif isinstance(event, ActionCompletedEvent):
-                yield ('action_completed', event)
-            else:
-                yield ('other', event)
-    finally:
-        if exclude_post_sync and effective_path != manifest_path:
-            effective_path.unlink(missing_ok=True)
-
-
-async def execute_post_sync(
-    porringer: API,
-    manifest_path: Path,
-    *,
-    project_directory: Path | None = None,
-    discovered: DiscoveredPlugins | None = None,
-) -> AsyncIterator[tuple[str, ProgressEvent]]:
-    """Execute only the post-sync commands from a manifest.
-
-    Builds a temporary manifest containing only the ``post_sync``
-    entries from the original, then streams execution events.
-
-    Args:
-        porringer: The porringer API instance.
-        manifest_path: Path to the original manifest file.
-        project_directory: Optional project directory override.
-        discovered: Pre-discovered plugins.
-
-    Yields:
-        ``(stage, event)`` tuples identical to :func:`execute_install`.
-    """
-    post_sync_path = _extract_post_sync(manifest_path)
-    if post_sync_path is None:
-        return
-
-    try:
-        params = SetupParameters(
-            paths=[post_sync_path],
-            project_directory=project_directory,
-        )
-
-        async for event in porringer.sync.execute_stream(params, plugins=discovered):
-            if isinstance(event, ManifestLoadedEvent):
-                yield ('manifest_loaded', event)
-            elif isinstance(event, ActionStartedEvent):
-                yield ('action_started', event)
-            elif isinstance(event, SubActionProgressEvent):
-                yield ('sub_progress', event)
-            elif isinstance(event, ActionCompletedEvent):
-                yield ('action_completed', event)
-            else:
-                yield ('other', event)
-    finally:
-        post_sync_path.unlink(missing_ok=True)
+    async for event in events:
+        if isinstance(event, ManifestLoadedEvent):
+            yield ("manifest_loaded", event)
+        elif isinstance(event, ActionStartedEvent):
+            yield ("action_started", event)
+        elif isinstance(event, ActionProgressEvent):
+            yield ("sub_progress", event)
+        elif isinstance(event, ActionCompletedEvent):
+            yield ("action_completed", event)
+        else:
+            yield ("other", event)
 
 
 # ---------------------------------------------------------------------------
@@ -473,13 +447,13 @@ InstallProgressCallback = Callable[[str, ProgressEvent], None]
 
 async def collect_install(
     porringer: API,
-    manifest_path: Path,
+    manifest_path: Path | None = None,
     *,
+    plan: SyncPlan | None = None,
     project_directory: Path | None = None,
     strategy: SyncStrategy = SyncStrategy.MINIMAL,
     prerelease_packages: set[str] | None = None,
     discovered: DiscoveredPlugins | None = None,
-    exclude_post_sync: bool = False,
     on_progress: InstallProgressCallback | None = None,
 ) -> SetupResults:
     """Execute install actions and return collected results.
@@ -495,16 +469,16 @@ async def collect_install(
     async for stage, event in execute_install(
         porringer,
         manifest_path,
+        plan=plan,
         project_directory=project_directory,
         strategy=strategy,
         prerelease_packages=prerelease_packages,
         discovered=discovered,
-        exclude_post_sync=exclude_post_sync,
     ):
-        if stage == 'manifest_loaded' and isinstance(event, ManifestLoadedEvent):
+        if stage == "manifest_loaded" and isinstance(event, ManifestLoadedEvent):
             manifest_result = event.manifest
             actions = list(event.manifest.actions)
-        elif stage == 'action_completed' and isinstance(event, ActionCompletedEvent):
+        elif stage == "action_completed" and isinstance(event, ActionCompletedEvent):
             collected.append(event.result)
 
         if on_progress is not None:
@@ -516,87 +490,6 @@ async def collect_install(
         manifest_path=manifest_result.manifest_path if manifest_result else None,
         metadata=manifest_result.metadata if manifest_result else None,
     )
-
-
-async def collect_post_sync(
-    porringer: API,
-    manifest_path: Path,
-    *,
-    project_directory: Path | None = None,
-    discovered: DiscoveredPlugins | None = None,
-    on_progress: InstallProgressCallback | None = None,
-) -> SetupResults:
-    """Execute post-sync commands and return collected results.
-
-    Consumes :func:`execute_post_sync` internally, collecting action
-    results and optionally forwarding each ``(stage, event)`` to
-    *on_progress* for UI updates.
-    """
-    actions: list[SetupAction] = []
-    collected: list[SetupActionResult] = []
-    manifest_result: SetupResults | None = None
-
-    async for stage, event in execute_post_sync(
-        porringer,
-        manifest_path,
-        project_directory=project_directory,
-        discovered=discovered,
-    ):
-        if stage == 'manifest_loaded' and isinstance(event, ManifestLoadedEvent):
-            manifest_result = event.manifest
-            actions = list(event.manifest.actions)
-        elif stage == 'action_completed' and isinstance(event, ActionCompletedEvent):
-            collected.append(event.result)
-
-        if on_progress is not None:
-            on_progress(stage, event)
-
-    return SetupResults(
-        actions=actions,
-        results=collected,
-        manifest_path=manifest_result.manifest_path if manifest_result else None,
-        metadata=manifest_result.metadata if manifest_result else None,
-    )
-
-
-def _strip_post_sync(manifest_path: Path) -> Path:
-    """Return a temp manifest copy with ``post_sync`` cleared.
-
-    If the manifest has no ``post_sync`` entries, returns the
-    original path unchanged.
-    """
-    import json
-
-    data = json.loads(manifest_path.read_text(encoding='utf-8'))
-    if not data.get('post_sync'):
-        return manifest_path
-
-    data['post_sync'] = []
-    fd, tmp_str = tempfile.mkstemp(prefix='spurtle_nosync_', suffix='.json')
-    tmp = Path(tmp_str)
-    tmp.write_text(json.dumps(data), encoding='utf-8')
-    os.close(fd)
-    return tmp
-
-
-def _extract_post_sync(manifest_path: Path) -> Path | None:
-    """Return a temp manifest containing only ``post_sync`` entries.
-
-    Returns ``None`` if the manifest has no ``post_sync`` entries.
-    """
-    import json
-
-    data = json.loads(manifest_path.read_text(encoding='utf-8'))
-    post_sync = data.get('post_sync', [])
-    if not post_sync:
-        return None
-
-    minimal = {'version': data.get('version', '1'), 'post_sync': post_sync}
-    fd, tmp_str = tempfile.mkstemp(prefix='spurtle_postsync_', suffix='.json')
-    tmp = Path(tmp_str)
-    tmp.write_text(json.dumps(minimal), encoding='utf-8')
-    os.close(fd)
-    return tmp
 
 
 # ---------------------------------------------------------------------------
@@ -611,39 +504,24 @@ async def load_manifest_actions(
     project_directory: Path | None = None,
     discovered: DiscoveredPlugins | None = None,
 ) -> list[SetupAction]:
-    """Load the action list from a manifest without dry-run checking.
-
-    When *discovered* plugins are provided, uses the efficient
-    ``async_load_manifest`` single-shot path.  Otherwise falls back
-    to streaming ``execute_stream`` with ``dry_run=True`` and
-    extracting actions from the first parse event.
+    """Load the action list from a manifest without presence checks.
 
     Args:
         porringer: The porringer API instance.
         manifest_path: Path to the manifest file.
         project_directory: Optional project directory override.
-        discovered: Pre-discovered plugins for the fast path.
+        discovered: Pre-discovered plugins.
 
     Returns:
         The list of :class:`SetupAction` entries from the manifest.
     """
-    if discovered is not None:
-        result = await porringer.sync.async_load_manifest(
-            manifest_path,
-            SyncStrategy.MINIMAL,
-            plugins=discovered,
-        )
-        return list(result.actions)
-
-    # Legacy streaming fallback
     params = SetupParameters(
-        paths=[str(manifest_path)],
-        dry_run=True,
+        paths=[manifest_path],
         project_directory=project_directory,
+        inspection_mode=InspectionMode.FAST,
     )
-    actions: list[SetupAction] = []
-    async for event in porringer.sync.execute_stream(params):
-        if isinstance(event, ManifestParsedEvent):
-            actions.extend(event.manifest.actions)
-            break
-    return actions
+    plan = await porringer.sync.plan(params, plugins=discovered)
+    plan.discard()
+    if not plan.manifests:
+        return []
+    return list(plan.manifests[0].actions)

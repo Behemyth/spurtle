@@ -10,7 +10,7 @@ follow manually.
 
 The manifest executes in **phased order**:
 
-1. **`runtimes.python`** → installs Python 3.14 via `pim` (Windows) or
+1. **`runtimes.python`** → installs Python 3.15 via `pim` (Windows) or
    `pyenv` (macOS / Linux).  The resolved interpreter path is propagated
    to all downstream phases.
 2. **`packages.python`** → installs `pipx` into the current Python
@@ -18,17 +18,13 @@ The manifest executes in **phased order**:
 3. **`tools.python`** → installs `pdm` as an isolated CLI tool via
    `pipx`.  The pipx backend is **deferred** at preview time — it becomes
    available only after Phase 2 installs it.
-4. **`post_sync`** → runs `pdm install` in the manifest directory,
-   creating the project virtualenv and installing all dependencies from
-   `pyproject.toml`.
 
 ## Manifest Overview
 
 ```text
-runtimes.python  ─►  pim / pyenv   ─►  Python 3.14
+runtimes.python  ─►  pim / pyenv   ─►  Python 3.15
 packages.python  ─►  pip / uv      ─►  pipx
 tools.python     ─►  pipx          ─►  pdm          (deferred resolution)
-post_sync        ─►  pdm install                    (project sync)
 ```
 
 ## Usage
@@ -65,8 +61,6 @@ Porringer's execution engine splits `PACKAGE`-type actions into sub-phases:
   resolves to the pipx backend and pdm is installed.
 - **Phase 3 (Project Sync):** Project-environment plugins (pdm, uv,
   poetry) run their native sync / install command.
-- **Phase 4 (Post-sync):** Arbitrary shell commands execute in the
-  manifest directory.
 
 If a tool backend is not available at preview time (e.g. pipx is not yet
 installed), the action is created with a *deferred* installer.  Resolution

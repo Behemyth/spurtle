@@ -80,6 +80,10 @@ class UserConfig(BaseModel):
     # ``None`` or absent means all plugins auto-update with manifest-aware defaults.
     plugin_auto_update: dict[str, bool | dict[str, bool]] | None = None
 
+    # Per-entry auto-update for the global manifest, keyed by Porringer entry id.
+    # Entries not listed auto-update.
+    entry_auto_update: dict[str, bool] | None = None
+
     # Per-manifest pre-release overrides.  Outer key is a normalised
     # manifest path (or URL for remote manifests) produced by
     # ``normalize_manifest_key()``.  Inner value is a sorted list of
@@ -116,7 +120,11 @@ class UserConfig(BaseModel):
     # manifest URLs for machine provisioning.  None means no profiles.
     setup_profiles: list[str] | None = None
 
-    @model_validator(mode='wrap')
+    # Absolute paths of registered project directories.  None means the
+    # one-time import from Porringer's old directory cache has not run yet.
+    projects: list[str] | None = None
+
+    @model_validator(mode="wrap")
     @classmethod
     def _recover_invalid_fields(cls, data: Any, handler: Any) -> UserConfig:
         """Silently drop fields that fail validation instead of rejecting the entire config.
@@ -133,11 +141,13 @@ class UserConfig(BaseModel):
             if not isinstance(data, dict):
                 raise
 
-            bad_fields = {str(e['loc'][0]) for e in exc.errors() if e.get('loc')}
+            bad_fields = {str(e["loc"][0]) for e in exc.errors() if e.get("loc")}
             cleaned = {k: v for k, v in data.items() if k not in bad_fields}
 
             for name in bad_fields:
-                logger.warning('Discarding invalid config field %r (using default)', name)
+                logger.warning(
+                    "Discarding invalid config field %r (using default)", name
+                )
 
             return handler(cleaned)
 
@@ -150,8 +160,8 @@ class UserConfig(BaseModel):
 class UpdateChannel(StrEnum):
     """Update channel selection."""
 
-    STABLE = 'stable'
-    DEVELOPMENT = 'development'
+    STABLE = "stable"
+    DEVELOPMENT = "development"
 
 
 class UpdateState(Enum):
@@ -188,7 +198,7 @@ DEFAULT_AUTO_UPDATE_INTERVAL_MINUTES = 5
 DEFAULT_TOOL_UPDATE_INTERVAL_MINUTES = 5
 
 # Default .appinstaller feed base URL.
-GITHUB_REPO_URL = 'https://github.com/synodic/spurtle'
+GITHUB_REPO_URL = "https://github.com/synodic/spurtle"
 
 
 @dataclass
@@ -217,7 +227,11 @@ class UpdateConfig:
         Returns:
             An ``UpdateConfig`` ready to initialise the updater.
         """
-        channel = UpdateChannel.DEVELOPMENT if config.update_channel == 'dev' else UpdateChannel.STABLE
+        channel = (
+            UpdateChannel.DEVELOPMENT
+            if config.update_channel == "dev"
+            else UpdateChannel.STABLE
+        )
         return cls(
             channel=channel,
             repo_url=config.update_source or GITHUB_REPO_URL,
@@ -228,7 +242,7 @@ class UpdateConfig:
     @property
     def channel_name(self) -> str:
         """Return the channel name (``dev`` or ``stable``)."""
-        return 'dev' if self.channel == UpdateChannel.DEVELOPMENT else 'stable'
+        return "dev" if self.channel == UpdateChannel.DEVELOPMENT else "stable"
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +266,7 @@ class ResolvedConfig:
     auto_update_interval_minutes: int
     tool_update_interval_minutes: int
     plugin_auto_update: dict[str, bool | dict[str, bool]] | None
+    entry_auto_update: dict[str, bool] | None
     prerelease_packages: dict[str, list[str]] | None
     auto_apply: bool
     auto_start: bool
@@ -259,3 +274,4 @@ class ResolvedConfig:
     last_client_update: str | None
     last_tool_updates: dict[str, str] | None
     setup_profiles: list[str] = field(default_factory=list)
+    projects: list[str] = field(default_factory=list)

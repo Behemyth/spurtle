@@ -40,7 +40,6 @@ from spurtle.application.screen.spinner import SpinnerCanvas
 from spurtle.application.theme import (
     ACTION_CARD_COMMAND_STYLE,
     ACTION_CARD_DESC_STYLE,
-    ACTION_CARD_DISTRO_BADGE_STYLE,
     ACTION_CARD_EXECUTING_STYLE,
     ACTION_CARD_PACKAGE_STYLE,
     ACTION_CARD_SKELETON_BAR_STYLE,
@@ -65,13 +64,12 @@ from spurtle.application.theme import (
     COPY_BTN_STYLE,
     COPY_FEEDBACK_MS,
     COPY_ICON,
-    WSL_DISTRO_HEADER_STYLE,
 )
 
 logger = logging.getLogger(__name__)
 
 #: Amber foreground for "Update available" version transitions.
-_UPDATE_AVAILABLE_COLOR = QColor('#d7ba7d')
+_UPDATE_AVAILABLE_COLOR = QColor("#d7ba7d")
 
 #: Timer interval for per-card inline spinner (ms).
 _SPINNER_INTERVAL = 50
@@ -79,15 +77,17 @@ _SPINNER_INTERVAL = 50
 
 #: Sort priority derived from porringer's execution phase order so the
 #: display order always matches the order actions actually execute.
-_KIND_ORDER: dict[PluginKind | None, int] = {kind: i for i, kind in enumerate(PHASE_ORDER)}
+_KIND_ORDER: dict[PluginKind | None, int] = {
+    kind: i for i, kind in enumerate(PHASE_ORDER)
+}
 
 #: Mapping of resolved status label → stylesheet for dry-run badge styling.
 _STATUS_STYLES: dict[str, str] = {
-    'Update available': ACTION_CARD_STATUS_UPDATE,
-    'Failed': ACTION_CARD_STATUS_FAILED,
-    'Pending': ACTION_CARD_STATUS_PENDING,
-    'Ready': ACTION_CARD_STATUS_SATISFIED,
-    'Needed': ACTION_CARD_STATUS_NEEDED,
+    "Update available": ACTION_CARD_STATUS_UPDATE,
+    "Failed": ACTION_CARD_STATUS_FAILED,
+    "Pending": ACTION_CARD_STATUS_PENDING,
+    "Ready": ACTION_CARD_STATUS_SATISFIED,
+    "Needed": ACTION_CARD_STATUS_NEEDED,
 }
 
 
@@ -150,7 +150,7 @@ class ActionCard(QFrame):
                 no real content.
         """
         super().__init__(parent)
-        self.setObjectName('actionCard')
+        self.setObjectName("actionCard")
         self._action: SetupAction | None = None
         self._is_skeleton = skeleton
         self._checking = False
@@ -178,13 +178,13 @@ class ActionCard(QFrame):
 
         # Placeholder bars
         bar1 = QFrame()
-        bar1.setObjectName('skeletonBar')
+        bar1.setObjectName("skeletonBar")
         bar1.setStyleSheet(ACTION_CARD_SKELETON_BAR_STYLE)
         bar1.setFixedSize(50, 14)
         row.addWidget(bar1)
 
         bar2 = QFrame()
-        bar2.setObjectName('skeletonBar')
+        bar2.setObjectName("skeletonBar")
         bar2.setStyleSheet(ACTION_CARD_SKELETON_BAR_STYLE)
         bar2.setFixedSize(120, 14)
         row.addWidget(bar2)
@@ -192,7 +192,7 @@ class ActionCard(QFrame):
         row.addStretch()
 
         bar3 = QFrame()
-        bar3.setObjectName('skeletonBar')
+        bar3.setObjectName("skeletonBar")
         bar3.setStyleSheet(ACTION_CARD_SKELETON_BAR_STYLE)
         bar3.setFixedSize(70, 14)
         row.addWidget(bar3)
@@ -202,7 +202,7 @@ class ActionCard(QFrame):
         row2 = QHBoxLayout()
         row2.setSpacing(8)
         bar4 = QFrame()
-        bar4.setObjectName('skeletonBar')
+        bar4.setObjectName("skeletonBar")
         bar4.setStyleSheet(ACTION_CARD_SKELETON_BAR_STYLE)
         bar4.setFixedSize(200, 12)
         row2.addWidget(bar4)
@@ -226,18 +226,13 @@ class ActionCard(QFrame):
         outer.addWidget(self._build_command_row())
 
     def _build_top_row(self) -> QHBoxLayout:
-        """Build the top row: type badge | [distro badge] | package name ... version | status/spinner | prerelease."""
+        """Build the top row: type badge | package name ... version | status/spinner | prerelease."""
         top = QHBoxLayout()
         top.setSpacing(8)
 
         self._type_badge = QLabel()
         self._type_badge.setStyleSheet(ACTION_CARD_TYPE_BADGE_STYLE)
         top.addWidget(self._type_badge)
-
-        self._distro_badge = QLabel()
-        self._distro_badge.setStyleSheet(ACTION_CARD_DISTRO_BADGE_STYLE)
-        self._distro_badge.hide()
-        top.addWidget(self._distro_badge)
 
         self._package_label = QLabel()
         self._package_label.setStyleSheet(ACTION_CARD_PACKAGE_STYLE)
@@ -267,7 +262,7 @@ class ActionCard(QFrame):
         self._status_label = QLabel()
         top.addWidget(self._status_label)
 
-        self._prerelease_cb = QCheckBox('Pre-release')
+        self._prerelease_cb = QCheckBox("Pre-release")
         self._prerelease_cb.hide()
         top.addWidget(self._prerelease_cb)
 
@@ -299,7 +294,7 @@ class ActionCard(QFrame):
 
         self._copy_btn = QToolButton()
         self._copy_btn.setText(COPY_ICON)
-        self._copy_btn.setToolTip('Copy to clipboard')
+        self._copy_btn.setToolTip("Copy to clipboard")
         self._copy_btn.setFixedSize(*COPY_BTN_SIZE)
         self._copy_btn.setStyleSheet(COPY_BTN_STYLE)
         self._copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -320,13 +315,13 @@ class ActionCard(QFrame):
         clipboard = QApplication.clipboard()
         if clipboard:
             clipboard.setText(self._command_label.text())
-        self._copy_btn.setText('\u2713')
-        self._copy_btn.setToolTip('Copied!')
+        self._copy_btn.setText("\u2713")
+        self._copy_btn.setToolTip("Copied!")
 
         def _restore() -> None:
             try:
                 self._copy_btn.setText(COPY_ICON)
-                self._copy_btn.setToolTip('Copy to clipboard')
+                self._copy_btn.setToolTip("Copy to clipboard")
             except RuntimeError:
                 pass
 
@@ -362,16 +357,10 @@ class ActionCard(QFrame):
         plugin_installed = plugin_installed or {}
         prerelease_overrides = prerelease_overrides or set()
 
-        kind_label = ACTION_KIND_LABELS.get(action.kind, 'Action')
+        kind_label = ACTION_KIND_LABELS.get(action.kind, "Action")
         self._type_badge.setText(kind_label)
         if action.installer:
-            self._type_badge.setToolTip(f'Plugin: {action.installer}')
-
-        if action.distro:
-            self._distro_badge.setText(action.distro)
-            self._distro_badge.show()
-        else:
-            self._distro_badge.hide()
+            self._type_badge.setToolTip(f"Plugin: {action.installer}")
 
         package_text = str(action.package) if action.package else action.description
         self._package_label.setText(package_text)
@@ -393,7 +382,7 @@ class ActionCard(QFrame):
 
         # Version — populated later by set_check_result()
 
-        self._version_label.setText('')
+        self._version_label.setText("")
 
         # Status
         self._populate_status(action, plugin_installed)
@@ -405,12 +394,14 @@ class ActionCard(QFrame):
             if action.include_prereleases and not is_user_override:
                 self._prerelease_cb.setChecked(True)
                 self._prerelease_cb.setEnabled(False)
-                self._prerelease_cb.setToolTip('Enabled by manifest')
+                self._prerelease_cb.setToolTip("Enabled by manifest")
             else:
                 self._prerelease_cb.setChecked(is_user_override)
-                self._prerelease_cb.setToolTip('Include pre-release versions')
+                self._prerelease_cb.setToolTip("Include pre-release versions")
                 self._prerelease_cb.toggled.connect(
-                    lambda checked, name=pkg_name: self.prerelease_toggled.emit(name, checked),
+                    lambda checked, name=pkg_name: self.prerelease_toggled.emit(
+                        name, checked
+                    ),
                 )
             self._prerelease_cb.show()
         else:
@@ -428,7 +419,7 @@ class ActionCard(QFrame):
         start the dry-run spinner.
         """
         if action.kind is None:
-            self._status_label.setText('Pending')
+            self._status_label.setText("Pending")
             self._status_label.setStyleSheet(ACTION_CARD_STATUS_PENDING)
             self._status_label.show()
             return
@@ -440,7 +431,7 @@ class ActionCard(QFrame):
         )
 
         if installer_missing:
-            self._status_label.setText('Not installed')
+            self._status_label.setText("Not installed")
             self._status_label.setStyleSheet(ACTION_CARD_STATUS_UNAVAILABLE)
             self._status_label.show()
         else:
@@ -452,15 +443,15 @@ class ActionCard(QFrame):
 
     def initial_status(self) -> str:
         """Return the initial status text set during :meth:`populate`."""
-        if self._is_skeleton or not hasattr(self, '_status_label'):
-            return ''
+        if self._is_skeleton or not hasattr(self, "_status_label"):
+            return ""
         if self._checking:
-            return 'Checking\u2026'
+            return "Checking\u2026"
         return self._status_label.text()
 
     def _stop_spinner(self) -> None:
         """Stop the inline checking spinner and show the status label."""
-        if not hasattr(self, '_spinner_timer'):
+        if not hasattr(self, "_spinner_timer"):
             return
         self._checking = False
         self._spinner_timer.stop()
@@ -492,13 +483,13 @@ class ActionCard(QFrame):
 
         # Satisfied (skipped) statuses get a checkmark prefix
         if result.skipped and status not in _STATUS_STYLES:
-            display = f'\u2713 {status}'
+            display = f"\u2713 {status}"
 
-        if not result.success and status == 'Failed':
+        if not result.success and status == "Failed":
             logger.warning(
-                'Dry-run check failed for %s: %s',
-                self._action.description if self._action else '(unknown)',
-                result.message or 'unknown error',
+                "Dry-run check failed for %s: %s",
+                self._action.description if self._action else "(unknown)",
+                result.message or "unknown error",
             )
 
         self._status_label.setText(display)
@@ -508,15 +499,17 @@ class ActionCard(QFrame):
         if result.message:
             self._status_label.setToolTip(result.message)
         else:
-            self._status_label.setToolTip('')
+            self._status_label.setToolTip("")
 
         # "Update available" — fade the card and make it clickable
-        if status == 'Update available':
+        if status == "Update available":
             self._apply_update_available_style()
 
         # CLI command — update with resolved cli_command from result
         assert self._action is not None
-        cmd_text = format_cli_command(self._action, result=result, suppress_description=True)
+        cmd_text = format_cli_command(
+            self._action, result=result, suppress_description=True
+        )
         if cmd_text:
             self._command_label.setText(cmd_text)
             self._command_row.show()
@@ -530,22 +523,33 @@ class ActionCard(QFrame):
         assert self._action is not None
         constraint = (
             str(self._action.package.constraint)
-            if self._action.package and getattr(self._action.package, 'constraint', None)
-            else ''
+            if self._action.package
+            and getattr(self._action.package, "constraint", None)
+            else ""
         )
         if result.installed_version and result.available_version:
-            self._version_label.setText(f'{result.installed_version} \u2192 {result.available_version}')
-            self._version_label.setStyleSheet(ACTION_CARD_VERSION_STYLE + ' color: #d7ba7d;')
+            self._version_label.setText(
+                f"{result.installed_version} \u2192 {result.available_version}"
+            )
+            self._version_label.setStyleSheet(
+                ACTION_CARD_VERSION_STYLE + " color: #d7ba7d;"
+            )
         elif result.installed_version:
             self._version_label.setText(result.installed_version)
             if constraint:
-                self._version_label.setToolTip(f'satisfies {constraint}')
-        elif result.available_version and is_version_specifier(result.available_version):
-            self._version_label.setText(f'requires {result.available_version}')
-            self._version_label.setStyleSheet(ACTION_CARD_VERSION_STYLE + ' color: grey;')
+                self._version_label.setToolTip(f"satisfies {constraint}")
+        elif result.available_version and is_version_specifier(
+            result.available_version
+        ):
+            self._version_label.setText(f"requires {result.available_version}")
+            self._version_label.setStyleSheet(
+                ACTION_CARD_VERSION_STYLE + " color: grey;"
+            )
         elif result.available_version:
-            self._version_label.setText(f'\u2192 {result.available_version}')
-            self._version_label.setStyleSheet(ACTION_CARD_VERSION_STYLE + ' color: grey;')
+            self._version_label.setText(f"\u2192 {result.available_version}")
+            self._version_label.setStyleSheet(
+                ACTION_CARD_VERSION_STYLE + " color: grey;"
+            )
 
     def _apply_update_available_style(self) -> None:
         """Fade the card and make it clickable for 'Update available' status."""
@@ -554,7 +558,7 @@ class ActionCard(QFrame):
         opacity.setOpacity(0.55)
         self.setGraphicsEffect(opacity)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.setToolTip('Manage this update in the Tools view')
+        self.setToolTip("Manage this update in the Tools view")
 
     def finalize_checking(self) -> None:
         """Resolve a still-pending 'Checking\u2026' status to 'Needed'.
@@ -562,15 +566,15 @@ class ActionCard(QFrame):
         Called after the preview finishes if the dry-run never sent a
         result for this card.  'Not installed' statuses are left alone.
         """
-        if self._is_skeleton or not hasattr(self, '_status_label'):
+        if self._is_skeleton or not hasattr(self, "_status_label"):
             return
         if self._checking:
             self._stop_spinner()
             logger.warning(
-                'Finalizing card with no dry-run result: %s',
-                self._action.description if self._action else '(unknown)',
+                "Finalizing card with no dry-run result: %s",
+                self._action.description if self._action else "(unknown)",
             )
-            self._status_label.setText('Needed')
+            self._status_label.setText("Needed")
             self._status_label.setStyleSheet(ACTION_CARD_STATUS_NEEDED)
 
     # ------------------------------------------------------------------
@@ -587,7 +591,7 @@ class ActionCard(QFrame):
             return
         self._stop_spinner()
         self.setStyleSheet(ACTION_CARD_EXECUTING_STYLE)
-        self._status_label.setText('Running\u2026')
+        self._status_label.setText("Running\u2026")
         self._status_label.setStyleSheet(ACTION_CARD_STATUS_RUNNING)
 
     def set_result(self, result: SetupActionResult) -> None:
@@ -610,7 +614,7 @@ class ActionCard(QFrame):
             self._status_label.setText(label)
             self._status_label.setStyleSheet(ACTION_CARD_STATUS_SKIPPED)
         elif result.success:
-            self._status_label.setText('Done')
+            self._status_label.setText("Done")
             self._status_label.setStyleSheet(ACTION_CARD_STATUS_DONE)
             # Update version if an upgrade completed
             new_version = result.available_version or self._check_available_version
@@ -618,7 +622,7 @@ class ActionCard(QFrame):
                 self._version_label.setText(new_version)
                 self._version_label.setStyleSheet(ACTION_CARD_VERSION_STYLE)
         else:
-            self._status_label.setText('Failed')
+            self._status_label.setText("Failed")
             self._status_label.setStyleSheet(ACTION_CARD_STATUS_FAILED)
 
     # ------------------------------------------------------------------
@@ -627,51 +631,25 @@ class ActionCard(QFrame):
 
     def status_text(self) -> str:
         """Return the current status label text."""
-        if self._is_skeleton or not hasattr(self, '_status_label'):
-            return ''
+        if self._is_skeleton or not hasattr(self, "_status_label"):
+            return ""
         if self._checking:
-            return 'Checking\u2026'
+            return "Checking\u2026"
         return self._status_label.text()
 
     def is_update_available(self) -> bool:
         """Return whether the card shows an 'Update available' status."""
-        return self.status_text() == 'Update available'
+        return self.status_text() == "Update available"
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """Navigate to Tools view when clicking an 'Update available' card."""
         if self.is_update_available() and self._action is not None:
-            installer = self._action.installer or ''
-            package = str(self._action.package.name) if self._action.package else ''
+            installer = self._action.installer or ""
+            package = str(self._action.package.name) if self._action.package else ""
             if installer and package:
                 self.navigate_to_tool.emit(installer, package)
                 return
         super().mousePressEvent(event)
-
-
-# ---------------------------------------------------------------------------
-# _DistroGroupHeader — section divider between native and WSL action groups
-# ---------------------------------------------------------------------------
-
-
-class _DistroGroupHeader(QLabel):
-    """Thin section divider between native and per-distro action groups.
-
-    Shows ``HOST`` for the native group or ``WSL — <distro>`` for each
-    WSL2 distro group.  Only inserted when both native and WSL actions
-    are present.
-    """
-
-    def __init__(self, distro_name: str | None, parent: QWidget | None = None) -> None:
-        """Initialise the header.
-
-        Args:
-            distro_name: WSL distro name, or ``None`` for the native group.
-            parent: Optional parent widget.
-        """
-        label = 'HOST' if distro_name is None else f'WSL \u2014 {distro_name}'.upper()
-        super().__init__(label, parent)
-        self.setObjectName('wslDistroHeader')
-        self.setStyleSheet(WSL_DISTRO_HEADER_STYLE)
 
 
 # ---------------------------------------------------------------------------
@@ -683,7 +661,7 @@ class ActionCardList(QWidget):
     """Container of :class:`ActionCard` widgets.
 
     Cards are keyed by ``SetupAction`` directly (frozen dataclass) so
-    that look-ups work across different ``execute_stream`` runs.
+    that look-ups work across inspection and execution.
     """
 
     prerelease_toggled = Signal(str, bool)
@@ -706,7 +684,6 @@ class ActionCardList(QWidget):
         self._layout.addStretch()
 
         self._cards: list[ActionCard] = []
-        self._group_headers: list[QLabel] = []
         self._action_map: dict[SetupAction, ActionCard] = {}
         self._index_map: dict[int, ActionCard] = {}
 
@@ -741,12 +718,6 @@ class ActionCardList(QWidget):
     ) -> None:
         """Replace skeleton cards with real action cards.
 
-        When actions include WSL distro entries (``action.distro is not
-        None``), the list is split into groups.  Native host actions
-        appear first under a ``HOST`` section header; each WSL distro
-        gets its own ``WSL — <distro>`` section header below.  If all
-        actions are native, no headers are inserted.
-
         Args:
             actions: The setup actions to display.
             plugin_installed: Plugin name → installed mapping.
@@ -754,45 +725,18 @@ class ActionCardList(QWidget):
         """
         self.clear()
 
-        # Partition into native and per-distro groups.
-        native_actions: list[SetupAction] = []
-        distro_actions: dict[str, list[SetupAction]] = {}
-        for act in actions:
-            if act.distro is None:
-                native_actions.append(act)
-            else:
-                distro_actions.setdefault(act.distro, []).append(act)
-
-        has_wsl = bool(distro_actions)
-
-        def _add_group(group_actions: list[SetupAction]) -> None:
-            for act in sorted(group_actions, key=action_sort_key):
-                card = ActionCard(self)
-                card.populate(
-                    act,
-                    plugin_installed=plugin_installed,
-                    prerelease_overrides=prerelease_overrides,
-                )
-                card.prerelease_toggled.connect(self.prerelease_toggled.emit)
-                card.navigate_to_tool.connect(self.navigate_to_tool.emit)
-                self._layout.insertWidget(self._layout.count() - 1, card)
-                self._cards.append(card)
-                self._action_map[act] = card
-
-        def _add_header(distro_name: str | None) -> None:
-            header = _DistroGroupHeader(distro_name, self)
-            self._layout.insertWidget(self._layout.count() - 1, header)
-            self._group_headers.append(header)
-
-        # Native actions (with host header only when WSL groups also exist)
-        if has_wsl and native_actions:
-            _add_header(None)
-        _add_group(native_actions)
-
-        # Per-distro groups
-        for distro_name in sorted(distro_actions):
-            _add_header(distro_name)
-            _add_group(distro_actions[distro_name])
+        for act in sorted(actions, key=action_sort_key):
+            card = ActionCard(self)
+            card.populate(
+                act,
+                plugin_installed=plugin_installed,
+                prerelease_overrides=prerelease_overrides,
+            )
+            card.prerelease_toggled.connect(self.prerelease_toggled.emit)
+            card.navigate_to_tool.connect(self.navigate_to_tool.emit)
+            self._layout.insertWidget(self._layout.count() - 1, card)
+            self._cards.append(card)
+            self._action_map[act] = card
 
         # Build original-index → card mapping so callers can look up by
         # the action index porringer emits, which is independent of the
@@ -829,7 +773,7 @@ class ActionCardList(QWidget):
         """Look up the card for a given action.
 
         ``SetupAction`` is a frozen dataclass, so the same logical
-        action from different ``execute_stream`` runs hashes equally.
+        action from inspection and execution hashes equally.
 
         Args:
             action: The setup action to find.
@@ -849,11 +793,7 @@ class ActionCardList(QWidget):
             card.finalize_checking()
 
     def clear(self) -> None:
-        """Remove all cards and group headers."""
-        for header in self._group_headers:
-            self._layout.removeWidget(header)
-            header.deleteLater()
-        self._group_headers.clear()
+        """Remove all cards."""
         for card in self._cards:
             self._layout.removeWidget(card)
             card.deleteLater()

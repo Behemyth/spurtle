@@ -14,8 +14,11 @@ Key design rules:
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import sys
+from pathlib import Path
 
 from spurtle.config import (
     load_build_config,
@@ -63,10 +66,60 @@ def seed_user_config_from_build() -> None:
     if changed:
         save_user_config(user)
         logger.info(
-            'Seeded user config from build config: source=%s, channel=%s',
+            "Seeded user config from build config: source=%s, channel=%s",
             user.update_source,
             user.update_channel,
         )
+
+
+def _legacy_projects_file() -> Path:
+    """Return the directory cache file written by Porringer 0.2."""
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        return Path(base) / "synodic" / "porringer" / "directories.json"
+    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    return Path(base) / "porringer" / "directories.json"
+
+
+def _read_legacy_projects(path: Path) -> list[str]:
+    """Read project paths from a Porringer 0.2 directory cache, ignoring bad data."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except OSError, json.JSONDecodeError:
+        logger.warning(
+            "Could not read legacy project list from %s", path, exc_info=True
+        )
+        return []
+
+    entries = data.get("directories") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        return []
+
+    projects: list[str] = []
+    for entry in entries:
+        raw = entry.get("path") if isinstance(entry, dict) else None
+        if isinstance(raw, str) and raw and raw not in projects:
+            projects.append(raw)
+    return projects
+
+
+def import_legacy_projects() -> None:
+    """Copy registered projects from Porringer's old directory cache, once.
+
+    Runs only while ``UserConfig.projects`` is unset.  Afterwards the
+    list is always saved, so later launches skip the import.
+    """
+    user = load_user_config()
+    if user.projects is not None:
+        return
+
+    path = _legacy_projects_file()
+    user.projects = _read_legacy_projects(path)
+    save_user_config(user)
+    if user.projects:
+        logger.info("Imported %d project(s) from %s", len(user.projects), path)
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +129,7 @@ def seed_user_config_from_build() -> None:
 
 def _default_channel() -> str:
     """Return the default channel based on whether we're running frozen."""
-    return 'stable' if getattr(sys, 'frozen', False) else 'dev'
+    return "stable" if getattr(sys, "frozen", False) else "dev"
 
 
 def resolve_config() -> ResolvedConfig:
@@ -119,6 +172,7 @@ def _resolve_from_user(user: UserConfig) -> ResolvedConfig:
         auto_update_interval_minutes=auto_interval,
         tool_update_interval_minutes=tool_interval,
         plugin_auto_update=user.plugin_auto_update,
+        entry_auto_update=user.entry_auto_update,
         prerelease_packages=user.prerelease_packages,
         auto_apply=auto_apply,
         auto_start=auto_start,
@@ -126,6 +180,7 @@ def _resolve_from_user(user: UserConfig) -> ResolvedConfig:
         last_client_update=user.last_client_update,
         last_tool_updates=user.last_tool_updates,
         setup_profiles=user.setup_profiles or [],
+        projects=user.projects or [],
     )
 
 

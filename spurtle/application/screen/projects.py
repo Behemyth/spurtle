@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 
 from porringer.api import API
 from porringer.backend.command.core.discovery import DiscoveredPlugins
-from porringer.schema import DirectoryValidationResult, ManifestDirectory
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -106,8 +105,8 @@ class ProjectsView(QWidget):
         right.setSpacing(0)
 
         # Install All button — visible when ≥1 widget is READY
-        self._install_all_btn = QPushButton('Install All')
-        self._install_all_btn.setToolTip('Install all ready manifests sequentially')
+        self._install_all_btn = QPushButton("Install All")
+        self._install_all_btn.setToolTip("Install all ready manifests sequentially")
         self._install_all_btn.setVisible(False)
         self._install_all_btn.clicked.connect(self._on_install_all)
         right.addWidget(self._install_all_btn)
@@ -116,12 +115,14 @@ class ProjectsView(QWidget):
         right.addWidget(self._stack, stretch=1)
 
         # Empty placeholder shown when there are no manifests
-        self._empty_placeholder = QLabel('No projects. Click + Add Project to get started.')
+        self._empty_placeholder = QLabel(
+            "No projects. Click + Add Project to get started."
+        )
         self._empty_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty_placeholder.setStyleSheet('color: grey; font-size: 13px;')
+        self._empty_placeholder.setStyleSheet("color: grey; font-size: 13px;")
         self._stack.addWidget(self._empty_placeholder)
 
-        self._loading_indicator = LoadingIndicator('Loading projects\u2026')
+        self._loading_indicator = LoadingIndicator("Loading projects\u2026")
         self._stack.addWidget(self._loading_indicator)
 
         outer.addLayout(right, stretch=1)
@@ -168,7 +169,7 @@ class ProjectsView(QWidget):
             self._load_widgets(directories)
 
         except Exception:
-            logger.exception('Failed to refresh projects')
+            logger.exception("Failed to refresh projects")
         finally:
             self._loading_indicator.stop()
             self._sidebar.set_enabled(True)
@@ -186,34 +187,26 @@ class ProjectsView(QWidget):
         """
         if self._coordinator is not None:
             snapshot = await self._coordinator.refresh()
-            results = snapshot.validated_directories
+            results = snapshot.directories
             discovered = snapshot.discovered
         else:
             from spurtle.operations.project import list_projects
 
-            loop = asyncio.get_running_loop()
-            projects = await loop.run_in_executor(None, lambda: list_projects(self._porringer))
-            results = [
-                DirectoryValidationResult(
-                    directory=ManifestDirectory(path=Path(p.path), name=p.name),
-                    exists=p.exists,
-                    has_manifest=p.has_manifest,
-                )
-                for p in projects
-            ]
+            results = await asyncio.to_thread(list_projects, self._porringer)
             discovered = None
 
         directories: list[tuple[str, str, bool]] = []
         current_keys: set[str] = set()
         for result in results:
-            d = result.directory
             valid = bool(result.exists and result.has_manifest)
-            key = str(Path(d.path).resolve())
-            directories.append((key, d.name or '', valid))
+            key = str(Path(result.path).resolve())
+            directories.append((key, result.name or "", valid))
             current_keys.add(key)
 
         # Append remote manifest entries from setup profiles
-        self._manifest_to_profile = await self._resolve_profiles(directories, current_keys)
+        self._manifest_to_profile = await self._resolve_profiles(
+            directories, current_keys
+        )
 
         return directories, discovered
 
@@ -256,11 +249,11 @@ class ProjectsView(QWidget):
                 for manifest_url in profile.manifests:
                     manifest_to_profile[manifest_url] = profile_url
                     if manifest_url not in current_keys:
-                        name = f'{profile.name}: {manifest_url.rsplit("/", 1)[-1]}'
+                        name = f"{profile.name}: {manifest_url.rsplit('/', 1)[-1]}"
                         directories.append((manifest_url, name, True))
                         current_keys.add(manifest_url)
             except Exception:
-                logger.exception('Failed to resolve profile: %s', profile_url)
+                logger.exception("Failed to resolve profile: %s", profile_url)
         return manifest_to_profile
 
     def _load_widgets(self, directories: list[tuple[str, str, bool]]) -> None:
@@ -268,7 +261,7 @@ class ProjectsView(QWidget):
         for key, _name, valid in directories:
             widget = self._widgets.get(key)
             if widget is not None and valid:
-                if key.startswith('https://'):
+                if key.startswith("https://"):
                     widget.load(key)
                 else:
                     path = Path(key)
@@ -305,7 +298,9 @@ class ProjectsView(QWidget):
                 )
                 widget._discovered_plugins = discovered
                 widget.install_finished.connect(self._on_install_finished)
-                widget.navigate_to_tool_requested.connect(self.navigate_to_tool_requested.emit)
+                widget.navigate_to_tool_requested.connect(
+                    self.navigate_to_tool_requested.emit
+                )
                 widget.phase_changed.connect(
                     lambda phase, k=key: self._on_widget_phase_changed(k, phase),
                 )
@@ -330,10 +325,10 @@ class ProjectsView(QWidget):
     def _on_add(self) -> None:
         """Show a choice dialog to add a local project or a remote profile URL."""
         dlg = QMessageBox(self)
-        dlg.setWindowTitle('Add')
-        dlg.setText('What would you like to add?')
-        local_btn = dlg.addButton('Local Project', QMessageBox.ButtonRole.AcceptRole)
-        profile_btn = dlg.addButton('Profile URL', QMessageBox.ButtonRole.ActionRole)
+        dlg.setWindowTitle("Add")
+        dlg.setText("What would you like to add?")
+        local_btn = dlg.addButton("Local Project", QMessageBox.ButtonRole.AcceptRole)
+        profile_btn = dlg.addButton("Profile URL", QMessageBox.ButtonRole.ActionRole)
         dlg.addButton(QMessageBox.StandardButton.Cancel)
         dlg.exec()
         clicked = dlg.clickedButton()
@@ -345,11 +340,11 @@ class ProjectsView(QWidget):
     def _add_local_project(self) -> None:
         """Open a file picker and immediately cache the chosen directory."""
         filenames = self._porringer.sync.manifest_filenames()
-        filter_str = 'Manifests (' + ' '.join(filenames) + ');;All Files (*)'
+        filter_str = "Manifests (" + " ".join(filenames) + ");;All Files (*)"
         chosen, _ = QFileDialog.getOpenFileName(
             self,
-            'Select Manifest File',
-            '',
+            "Select Manifest File",
+            "",
             filter_str,
         )
         if not chosen:
@@ -362,9 +357,9 @@ class ProjectsView(QWidget):
             from spurtle.operations.project import add_project
 
             add_project(self._porringer, str(directory))
-            logger.info('Cached new project directory: %s', directory)
+            logger.info("Cached new project directory: %s", directory)
         except NotADirectoryError, ValueError:
-            logger.debug('Directory already cached or invalid: %s', directory)
+            logger.debug("Directory already cached or invalid: %s", directory)
 
         if self._coordinator is not None:
             self._coordinator.invalidate()
@@ -375,8 +370,8 @@ class ProjectsView(QWidget):
         """Prompt for a profile URL and add it to the config."""
         url, ok = QInputDialog.getText(
             self,
-            'Add Profile URL',
-            'Enter an HTTPS profile URL:',
+            "Add Profile URL",
+            "Enter an HTTPS profile URL:",
         )
         if not ok or not url.strip():
             return
@@ -384,7 +379,7 @@ class ProjectsView(QWidget):
         try:
             self.add_profile(url)
         except ValueError as exc:
-            QMessageBox.warning(self, 'Invalid URL', str(exc))
+            QMessageBox.warning(self, "Invalid URL", str(exc))
 
     def add_profile(self, url: str) -> None:
         """Add a setup profile URL to the config and refresh.
@@ -411,7 +406,7 @@ class ProjectsView(QWidget):
 
     def _on_remove(self, key: str) -> None:
         """Remove a project directory or profile manifest."""
-        if key.startswith('https://'):
+        if key.startswith("https://"):
             self._remove_profile_manifest(key)
         else:
             self._remove_local_project(key)
@@ -421,7 +416,7 @@ class ProjectsView(QWidget):
         from spurtle.operations.project import remove_project
 
         remove_project(self._porringer, key)
-        logger.info('Removed project directory from cache: %s', key)
+        logger.info("Removed project directory from cache: %s", key)
 
         # Tear down the widget immediately
         widget = self._widgets.pop(key, None)
@@ -448,12 +443,16 @@ class ProjectsView(QWidget):
         owning_profile: str | None = self._manifest_to_profile.get(manifest_url)
 
         if owning_profile is not None:
-            updated = [p for p in self._store.config.setup_profiles if p != owning_profile]
+            updated = [
+                p for p in self._store.config.setup_profiles if p != owning_profile
+            ]
             self._store.update(setup_profiles=updated)
             self._profile_cache.pop(owning_profile, None)
-            logger.info('Removed setup profile: %s', owning_profile)
+            logger.info("Removed setup profile: %s", owning_profile)
         else:
-            logger.warning('Could not find owning profile for manifest: %s', manifest_url)
+            logger.warning(
+                "Could not find owning profile for manifest: %s", manifest_url
+            )
 
         # Tear down the widget immediately
         widget = self._widgets.pop(manifest_url, None)
@@ -500,7 +499,7 @@ class ProjectsView(QWidget):
                 await done_event.wait()
                 widget.install_finished.disconnect(slot)
         except Exception:
-            logger.exception('Batch install failed')
+            logger.exception("Batch install failed")
         finally:
             self._install_all_btn.setEnabled(True)
             self._update_install_all_visibility()

@@ -1,80 +1,118 @@
-"""Register example manifest directories with porringer.
+"""Development setup, run automatically as a PDM ``post_install`` hook.
 
-A one-time dev setup helper that discovers all subdirectories under the
-repository ``examples/`` folder and registers them with porringer's
-directory cache.  Already-registered directories are silently skipped.
+Registers the repository ``examples/`` directories as projects in the
+dev-mode user config, and links a sibling ``../porringer`` checkout into
+the environment as an editable install when one exists.
 
-Runs automatically as a ``post_install`` hook via PDM.
+Porringer is deliberately not imported here: the hook must work against
+whichever Porringer version is installed, including none.
 """
 
-import logging
+import importlib.metadata
+import os
+import subprocess
 import sys
 from pathlib import Path
 
-from porringer.api import API
-from porringer.schema import LocalConfiguration
-from rich.console import Console
+from spurtle.config import load_user_config, save_user_config, set_dev_mode
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_EXAMPLES_DIR = _REPO_ROOT / 'examples'
+_EXAMPLES_DIR = _REPO_ROOT / "examples"
+_PORRINGER_DIR = _REPO_ROOT.parent / "porringer"
 
-console = Console(highlight=False)
+
+def _register_examples() -> None:
+    """Add every ``examples/`` subdirectory to the dev config and prune stale ones."""
+    set_dev_mode(True)
+    config = load_user_config()
+
+    examples_root = _EXAMPLES_DIR.resolve()
+    example_dirs = sorted(
+        str(child.resolve()) for child in _EXAMPLES_DIR.iterdir() if child.is_dir()
+    )
+    current = config.projects or []
+
+    kept: list[str] = []
+    for entry in current:
+        path = Path(entry).resolve()
+        if examples_root in path.parents and str(path) not in example_dirs:
+            print(f"  - {path.name} (removed)")
+            continue
+        kept.append(entry)
+
+    known = {str(Path(entry).resolve()) for entry in kept}
+    added = [path for path in example_dirs if path not in known]
+    for path in added:
+        print(f"  + {Path(path).name} ({path})")
+
+    projects = kept + added
+    if projects != current:
+        save_user_config(config.model_copy(update={"projects": projects}))
+    elif example_dirs:
+        print(f"  {len(example_dirs)} example project(s) already registered")
+
+
+def _installed_porringer() -> str:
+    try:
+        return importlib.metadata.version("porringer")
+    except importlib.metadata.PackageNotFoundError:
+        return "none"
+
+
+def _link_porringer() -> None:
+    """Install ``../porringer`` as editable, replacing the locked distribution."""
+    # Stopgap until a Porringer tooling profile installs sibling editables.
+    if not (_PORRINGER_DIR / "pyproject.toml").is_file():
+        print(
+            f"  using locked porringer {_installed_porringer()} (no checkout at {_PORRINGER_DIR})"
+        )
+        return
+
+    python = sys.executable
+    has_pip = (
+        subprocess.run(
+            [python, "-m", "pip", "--version"], capture_output=True, check=False
+        ).returncode
+        == 0
+    )
+    if not has_pip:
+        subprocess.run(
+            [python, "-m", "ensurepip", "--default-pip"],
+            capture_output=True,
+            check=False,
+        )
+
+    result = subprocess.run(
+        [
+            python,
+            "-m",
+            "pip",
+            "install",
+            "--quiet",
+            "--disable-pip-version-check",
+            "--editable",
+            str(_PORRINGER_DIR),
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        print(
+            f"  warning: failed to link {_PORRINGER_DIR}; using porringer {_installed_porringer()}"
+        )
+        return
+
+    print(f"  linked porringer HEAD from {_PORRINGER_DIR} ({_installed_porringer()})")
 
 
 def main() -> None:
-    """Register every example subdirectory with porringer's directory cache."""
-    # Silence porringer's internal logging so our output stays clean
-    logging.basicConfig(level=logging.WARNING)
+    """Run the dev setup steps; skipped entirely on CI."""
+    if os.environ.get("CI"):
+        return
 
-    if not _EXAMPLES_DIR.is_dir():
-        console.print(f'  [red]x[/red] examples/ directory not found at {_EXAMPLES_DIR}')
-        sys.exit(1)
-
-    local_config = LocalConfiguration()
-    porringer = API(local_config)
-
-    cached = porringer.cache.list_directories()
-    registered = {dr.directory.path.resolve(): dr.directory for dr in cached}
-    example_dirs = {child.resolve() for child in _EXAMPLES_DIR.iterdir() if child.is_dir()}
-
-    # --- Prune stale entries whose directories no longer exist under examples/ ---
-    pruned = 0
-    for resolved, entry in registered.items():
-        if _EXAMPLES_DIR.resolve() in resolved.parents and resolved not in example_dirs:
-            try:
-                porringer.cache.remove_directory(entry.path)
-                name = entry.name or resolved.name
-                console.print(f'  [yellow]-[/yellow] [bold]{name}[/bold] [dim](removed)[/dim]')
-                pruned += 1
-            except ValueError:
-                pass
-
-    # --- Register new example directories ---
-    added = 0
-    skipped = 0
-
-    for child in sorted(example_dirs):
-        if child in registered:
-            skipped += 1
-            continue
-
-        try:
-            porringer.cache.add_directory(child, name=child.name)
-            console.print(f'  [green]+[/green] [bold]{child.name}[/bold] [dim]({child})[/dim]')
-            added += 1
-        except ValueError:
-            skipped += 1
-
-    if pruned:
-        noun = 'entry' if pruned == 1 else 'entries'
-        console.print(f'  [yellow]{pruned} stale {noun} removed[/yellow]')
-    if added:
-        noun = 'directory' if added == 1 else 'directories'
-        console.print(f'  [green]{added} example {noun} registered[/green]')
-    elif skipped and not pruned:
-        noun = 'directory' if skipped == 1 else 'directories'
-        console.print(f'  [dim]{skipped} example {noun} already registered[/dim]')
+    if _EXAMPLES_DIR.is_dir():
+        _register_examples()
+    _link_porringer()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

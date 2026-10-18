@@ -6,7 +6,7 @@
     "url": "https://github.com/synodic/porringer",
     "runtimes": {
         "python": [
-            "3.14"
+            "3.15"
         ]
     },
     "packages": {
@@ -24,8 +24,5 @@
                 "description": "Python package and dependency manager"
             }
         ]
-    },
-    "post_sync": [
-        "pdm install"
-    ]
+    }
 }

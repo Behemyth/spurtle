@@ -6,8 +6,9 @@ Encapsulates the one-time initialisation that both
 before the GUI event loop starts:
 
 1. Seed user config from the build config (one-time propagation).
-2. Register the ``spurtle://`` URI protocol handler (no-op under MSIX).
-3. Synchronise the Windows auto-startup state (no-op under MSIX).
+2. Import projects from Porringer's old directory cache (one-time).
+3. Register the ``spurtle://`` URI protocol handler (no-op under MSIX).
+4. Synchronise the Windows auto-startup state (no-op under MSIX).
 
 Heavy dependencies (PySide6, porringer) are **not** imported here so
 that the bootstrap path can call this before loading them.
@@ -17,7 +18,11 @@ import logging
 import sys
 
 from spurtle.protocol import register_protocol
-from spurtle.resolution import resolve_config, seed_user_config_from_build
+from spurtle.resolution import (
+    import_legacy_projects,
+    resolve_config,
+    seed_user_config_from_build,
+)
 from spurtle.startup import sync_startup
 
 logger = logging.getLogger(__name__)
@@ -53,6 +58,7 @@ def run_startup_preamble(exe_path: str | None = None) -> None:
         exe_path = sys.executable
 
     seed_user_config_from_build()
+    import_legacy_projects()
 
     # Both calls are MSIX-aware and become no-ops when packaged.
     register_protocol(exe_path)
@@ -60,4 +66,4 @@ def run_startup_preamble(exe_path: str | None = None) -> None:
     config = resolve_config()
     sync_startup(exe_path, auto_start=config.auto_start)
 
-    logger.info('Startup preamble complete (auto_start=%s)', config.auto_start)
+    logger.info("Startup preamble complete (auto_start=%s)", config.auto_start)

@@ -1,8 +1,8 @@
 """Project directory operations.
 
 Pure functions for listing, adding, removing, and querying status of
-cached project directories.  No Qt, no signals — just porringer API
-calls in → typed results out.
+registered project directories.  The registry is ``UserConfig.projects``.
+No Qt, no signals.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from porringer.schema import SkipReason
 
+from spurtle.config import load_user_config, save_user_config
 from spurtle.operations.schema import (
     ActionInfo,
     ProjectInfo,
@@ -42,29 +43,36 @@ def find_manifest(porringer: API, directory: str | Path) -> Path | None:
     return None
 
 
+def _project_info(porringer: API, directory: Path) -> ProjectInfo:
+    """Build a :class:`ProjectInfo` from the filesystem."""
+    exists = directory.is_dir()
+    return ProjectInfo(
+        path=str(directory),
+        name=directory.name,
+        exists=exists,
+        has_manifest=exists and porringer.sync.has_manifest(directory),
+    )
+
+
+def registered_projects() -> list[Path]:
+    """Return the registered project directories from the user config."""
+    return [Path(p) for p in load_user_config().projects or []]
+
+
 def list_projects(porringer: API) -> list[ProjectInfo]:
-    """List all cached project directories with validation status.
+    """List all registered project directories with validation status.
 
     Args:
         porringer: The porringer API instance.
 
     Returns:
-        A list of :class:`ProjectInfo` for every cached directory.
+        A list of :class:`ProjectInfo` for every registered directory.
     """
-    results = porringer.cache.list_directories(validate=True, check_manifest=True)
-    return [
-        ProjectInfo(
-            path=str(r.directory.path),
-            name=r.directory.name or '',
-            exists=r.exists or False,
-            has_manifest=r.has_manifest or False,
-        )
-        for r in results
-    ]
+    return [_project_info(porringer, directory) for directory in registered_projects()]
 
 
 def add_project(porringer: API, path: str | Path) -> ProjectInfo:
-    """Add a directory to the porringer project cache.
+    """Register a project directory.
 
     Args:
         porringer: The porringer API instance.
@@ -75,59 +83,52 @@ def add_project(porringer: API, path: str | Path) -> ProjectInfo:
 
     Raises:
         NotADirectoryError: If *path* is not an existing directory.
-        ValueError: If porringer rejects the directory (e.g. duplicate).
+        ValueError: If the directory is already registered.
     """
-    directory = Path(path)
+    directory = Path(path).resolve()
     if not directory.is_dir():
-        msg = f'Not a directory: {directory}'
+        msg = f"Not a directory: {directory}"
         raise NotADirectoryError(msg)
 
-    porringer.cache.add_directory(directory)
+    config = load_user_config()
+    projects = list(config.projects or [])
+    if any(Path(existing) == directory for existing in projects):
+        msg = f"Directory already registered: {directory}"
+        raise ValueError(msg)
 
-    # Re-query to get validation status for the returned info.
-    for r in porringer.cache.list_directories(validate=True, check_manifest=True):
-        if Path(r.directory.path) == directory:
-            return ProjectInfo(
-                path=str(r.directory.path),
-                name=r.directory.name or '',
-                exists=r.exists or False,
-                has_manifest=r.has_manifest or False,
-            )
-
-    # Shouldn't happen, but satisfy the return type.
-    return ProjectInfo(
-        path=str(directory),
-        name=directory.stem,
-        exists=directory.exists(),
-        has_manifest=False,
-    )
+    projects.append(str(directory))
+    save_user_config(config.model_copy(update={"projects": projects}))
+    return _project_info(porringer, directory)
 
 
 def remove_project(porringer: API, path: str | Path) -> None:
-    """Remove a directory from the porringer project cache.
+    """Unregister a project directory.
 
     Args:
         porringer: The porringer API instance.
         path: Filesystem path to remove.
     """
-    porringer.cache.remove_directory(Path(path))
+    target = Path(path)
+    config = load_user_config()
+    projects = [p for p in config.projects or [] if Path(p) != target]
+    save_user_config(config.model_copy(update={"projects": projects}))
 
 
 def _run_add_project(arg: str | None, porringer: API) -> dict:
     if not arg:
-        return {'error': 'add_project requires a path argument'}
+        return {"error": "add_project requires a path argument"}
     try:
         add_project(porringer, arg)
     except (NotADirectoryError, ValueError) as exc:
-        return {'error': str(exc)}
-    return {'ok': True, 'action': 'add_project', 'path': arg}
+        return {"error": str(exc)}
+    return {"ok": True, "action": "add_project", "path": arg}
 
 
 def _run_remove_project(arg: str | None, porringer: API) -> dict:
     if not arg:
-        return {'error': 'remove_project requires a path argument'}
+        return {"error": "remove_project requires a path argument"}
     remove_project(porringer, arg)
-    return {'ok': True, 'action': 'remove_project', 'path': arg}
+    return {"ok": True, "action": "remove_project", "path": arg}
 
 
 def _run_project_status(arg: str | None, porringer: API) -> dict:
@@ -135,7 +136,7 @@ def _run_project_status(arg: str | None, porringer: API) -> dict:
     import dataclasses
 
     if not arg:
-        return {'error': 'project_status requires a path argument in headless mode'}
+        return {"error": "project_status requires a path argument in headless mode"}
     status = asyncio.run(project_status(porringer, arg))
     return dataclasses.asdict(status)
 
@@ -153,20 +154,20 @@ def run_project_action(
     """
     import dataclasses
 
-    if name == 'list_projects':
+    if name == "list_projects":
         projects = list_projects(porringer)
-        return {'projects': [dataclasses.asdict(p) for p in projects]}
+        return {"projects": [dataclasses.asdict(p) for p in projects]}
 
     handlers: dict[str, Callable[[str | None, API], dict]] = {
-        'add_project': _run_add_project,
-        'remove_project': _run_remove_project,
-        'project_status': _run_project_status,
+        "add_project": _run_add_project,
+        "remove_project": _run_remove_project,
+        "project_status": _run_project_status,
     }
     handler = handlers.get(name)
     if handler is not None:
         return handler(arg, porringer)
 
-    return {'error': f'unknown project action: {name}'}
+    return {"error": f"unknown project action: {name}"}
 
 
 async def project_status(
@@ -193,6 +194,7 @@ async def project_status(
     from spurtle.operations.schema import (
         PreviewActionChecked,
         PreviewManifestParsed,
+        PreviewPlanned,
         PreviewReady,
         classify_status,
     )
@@ -201,7 +203,7 @@ async def project_status(
     manifest_path = find_manifest(porringer, directory)
 
     if manifest_path is None:
-        return ProjectStatus(path=str(directory), phase='no_manifest')
+        return ProjectStatus(path=str(directory), phase="no_manifest")
 
     actions: list[ActionInfo] = []
     checked_count = 0
@@ -244,16 +246,19 @@ async def project_status(
             checked_count += 1
 
             bucket = classify_status(event.status)
-            if bucket == 'needed':
+            if bucket == "needed":
                 needed += 1
-            elif bucket == 'satisfied':
+            elif bucket == "satisfied":
                 satisfied += 1
-            elif bucket == 'pending':
+            elif bucket == "pending":
                 pending += 1
             if event.result.skip_reason == SkipReason.UPDATE_AVAILABLE:
                 upgradable += 1
 
-    phase = 'ready' if not fast or checked_count > 0 else 'parsed'
+        elif isinstance(event, PreviewPlanned):
+            event.plan.discard()
+
+    phase = "ready" if not fast or checked_count > 0 else "parsed"
 
     return ProjectStatus(
         path=str(directory),

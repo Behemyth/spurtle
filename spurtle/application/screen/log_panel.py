@@ -14,7 +14,7 @@ from __future__ import annotations
 import html
 import logging
 
-from porringer.schema import SetupAction, SetupActionResult, SubActionProgress
+from porringer.schema import ActionProgress, SetupAction, SetupActionResult
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtWidgets import (
@@ -56,7 +56,9 @@ class ActionLogSection(QWidget):
     and a monospace ``QTextEdit`` body that displays colour-coded output lines.
     """
 
-    def __init__(self, action: SetupAction, index: int, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, action: SetupAction, index: int, parent: QWidget | None = None
+    ) -> None:
         """Initialise the section.
 
         Args:
@@ -73,7 +75,9 @@ class ActionLogSection(QWidget):
         layout.setSpacing(0)
 
         # --- Header ---
-        self._header = ClickableHeader('sectionHeader', LOG_SECTION_HEADER_STYLE, parent=self)
+        self._header = ClickableHeader(
+            "sectionHeader", LOG_SECTION_HEADER_STYLE, parent=self
+        )
         self._header.clicked.connect(self._toggle)
 
         header_layout = self._header.header_layout
@@ -83,13 +87,13 @@ class ActionLogSection(QWidget):
         self._chevron.setFixedWidth(14)
         header_layout.addWidget(self._chevron)
 
-        kind_label = ACTION_KIND_LABELS.get(action.kind, 'Action')
+        kind_label = ACTION_KIND_LABELS.get(action.kind, "Action")
         desc = action.package_description or action.description
-        title = QLabel(f'{index}. [{kind_label}] {desc}')
+        title = QLabel(f"{index}. [{kind_label}] {desc}")
         title.setStyleSheet(LOG_SECTION_TITLE_STYLE)
         header_layout.addWidget(title, stretch=1)
 
-        self._status_label = QLabel('Running…')
+        self._status_label = QLabel("Running…")
         self._status_label.setStyleSheet(LOG_STATUS_RUNNING)
         header_layout.addWidget(self._status_label)
 
@@ -102,7 +106,9 @@ class ActionLogSection(QWidget):
         self._output.setStyleSheet(LOG_OUTPUT_STYLE)
         self._output.setMinimumHeight(60)
         self._output.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._output.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._output.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         self._output.setFixedHeight(60)
         self._output.document().contentsChanged.connect(self._update_output_height)
         layout.addWidget(self._output)
@@ -117,7 +123,7 @@ class ActionLogSection(QWidget):
             stream: ``'stdout'``, ``'stderr'``, or ``None`` for phase messages.
         """
         colour = LOG_COLOR_STDOUT
-        if stream == 'stderr':
+        if stream == "stderr":
             colour = LOG_COLOR_STDERR
         elif stream is None:
             colour = LOG_COLOR_PHASE
@@ -140,17 +146,21 @@ class ActionLogSection(QWidget):
             label = skip_reason_label(result.skip_reason)
             self._status_label.setText(label)
             self._status_label.setStyleSheet(LOG_STATUS_SKIPPED)
-            self.append_output(f'⏭ Skipped: {label}', None)
+            self.append_output(f"⏭ Skipped: {label}", None)
         elif result.success:
-            self._status_label.setText('Done')
+            self._status_label.setText("Done")
             self._status_label.setStyleSheet(LOG_STATUS_SUCCESS)
-            msg = result.message or 'Completed successfully'
-            self._output.append(f'<span style="color: {LOG_COLOR_SUCCESS};">✓ {html.escape(msg)}</span>')
+            msg = result.message or "Completed successfully"
+            self._output.append(
+                f'<span style="color: {LOG_COLOR_SUCCESS};">✓ {html.escape(msg)}</span>'
+            )
         else:
-            self._status_label.setText('Failed')
+            self._status_label.setText("Failed")
             self._status_label.setStyleSheet(LOG_STATUS_FAILED)
-            msg = result.message or 'Unknown error'
-            self._output.append(f'<span style="color: {LOG_COLOR_ERROR};">✗ {html.escape(msg)}</span>')
+            msg = result.message or "Unknown error"
+            self._output.append(
+                f'<span style="color: {LOG_COLOR_ERROR};">✗ {html.escape(msg)}</span>'
+            )
 
     # --- Collapse / expand ---
 
@@ -218,7 +228,7 @@ class ExecutionLogPanel(QWidget):
         """
         return self._sections.get(action)
 
-    def on_sub_progress(self, action: SetupAction, progress: SubActionProgress) -> None:
+    def on_sub_progress(self, action: SetupAction, progress: ActionProgress) -> None:
         """Handle a sub-action progress event.
 
         Routes output lines and phase messages to the correct section.
@@ -232,11 +242,13 @@ class ExecutionLogPanel(QWidget):
             return
 
         if progress.output is not None:
-            section.append_output(progress.output, progress.stream)
+            section.append_output(progress.output, progress.channel)
         elif progress.message is not None:
             section.append_output(progress.message)
 
-    def on_action_completed(self, action: SetupAction, result: SetupActionResult) -> None:
+    def on_action_completed(
+        self, action: SetupAction, result: SetupActionResult
+    ) -> None:
         """Handle an action completion event.
 
         Args:

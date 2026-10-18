@@ -9,14 +9,14 @@ readme = "README.md"
 
 dynamic = ["version"]
 
-requires-python = ">=3.14, <3.15"
+requires-python = ">=3.15, <3.16"
 
 dependencies = [
-    "pyside6>=6.11.0",
-    "packaging>=26.2",
-    "porringer>=0.2.1.dev90",
+    "pyside6>=6.12.0",
+    "packaging>=26.3",
+    "porringer>=0.3.1",
     "qasync>=0.28.0",
-    "typer>=0.25.1",
+    "typer>=0.27.3",
 ]
 
 [project.urls]
@@ -25,16 +25,16 @@ repository = "https://github.com/synodic/spurtle"
 
 [dependency-groups]
 build = [
-    "pyinstaller>=6.20.0",
+    "pyinstaller>=6.22.3",
 ]
 lint = [
-    "ruff>=0.15.12",
-    "pyrefly>=0.63.1",
+    "ruff>=0.17.1",
+    "pyrefly>=1.4.0",
 ]
 test = [
-    "pytest>=9.0.3",
+    "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
-    "pytest-mock>=3.15.1",
+    "pytest-mock>=3.17.0",
 ]
 
 [project.scripts]

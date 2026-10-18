@@ -5,13 +5,13 @@ name: Release Build
 
 on:
   workflow_run:
-    workflows: [ "Update Python Development Release" ]
-    types: [ completed ]
+    workflows: ["Update Python Development Release"]
+    types: [completed]
     branches:
       - development
       - main
   release:
-    types: [ published ]
+    types: [published]
   workflow_dispatch:
     inputs:
       version:
@@ -49,7 +49,7 @@ jobs:
         if: github.event_name == 'workflow_run'
         uses: pdm-project/setup-pdm@v4
         with:
-          python-version: "3.14"
+          python-version: "3.15"
           cache: true
 
       - name: Install dependencies
@@ -87,7 +87,7 @@ jobs:
       channel: ${{ needs.get-version.outputs.channel }}
 
   release:
-    needs: [ get-version, build-and-package ]
+    needs: [get-version, build-and-package]
     runs-on: ubuntu-latest
     steps:
       - name: Download release artifacts
@@ -100,7 +100,8 @@ jobs:
       - name: Clear dev release assets
         if: needs.get-version.outputs.is-dev == 'true'
         continue-on-error: true
-        run: gh release view dev --json assets -q '.assets[].name' | xargs -I {} gh
+        run:
+          gh release view dev --json assets -q '.assets[].name' | xargs -I {} gh
           release delete-asset dev {} --yes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

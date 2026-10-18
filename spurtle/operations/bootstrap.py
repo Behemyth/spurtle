@@ -9,8 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from porringer.api import API
-from porringer.schema import LocalConfiguration
+from porringer import API
 
 from spurtle.client import Client
 from spurtle.resolution import resolve_config, resolve_update_config
@@ -29,20 +28,17 @@ def init_services() -> tuple[Client, API, ResolvedConfig]:
     config = resolve_config()
     client = Client()
 
-    local_config = LocalConfiguration()
-    porringer = API(local_config)
+    porringer = API()
 
     update_config = resolve_update_config(config)
     client.initialize_updater(update_config)
 
-    cached_dirs = porringer.cache.list_directories()
-
     logger.info(
-        'Spurtle v%s started (channel: %s, source: %s, cached_projects: %d)',
+        "Spurtle v%s started (channel: %s, source: %s, projects: %d)",
         client.version,
         update_config.channel.name,
         update_config.repo_url,
-        len(cached_dirs),
+        len(config.projects),
     )
 
     return client, porringer, config

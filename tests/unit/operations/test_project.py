@@ -1,22 +1,35 @@
 """Tests for operations.project module."""
 
+import json
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, create_autospec
 
 import pytest
+from porringer import API
 
+import spurtle.config as config_module
+from spurtle.config import load_user_config, save_user_config
 from spurtle.operations.project import add_project, list_projects, remove_project
 from spurtle.operations.schema import ProjectInfo
+from spurtle.resolution import import_legacy_projects
+from spurtle.schema import UserConfig
 
 
-def _make_dir_result(path: str, *, exists: bool = True, has_manifest: bool = False) -> MagicMock:
-    """Create a mock DirectoryResult."""
-    result = MagicMock()
-    result.directory.path = path
-    result.directory.name = Path(path).name
-    result.exists = exists
-    result.has_manifest = has_manifest
-    return result
+@pytest.fixture(autouse=True)
+def _isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the user config at a temporary directory."""
+    config_root = tmp_path / 'config'
+    monkeypatch.setattr(config_module, 'config_dir', lambda: config_root)
+    monkeypatch.setattr(config_module, '_legacy_config_dir', lambda: config_root)
+    return config_root
+
+
+def _api(*, has_manifest: bool = False) -> MagicMock:
+    """Create an API mock whose manifest check returns *has_manifest*."""
+    api = create_autospec(API, instance=True)
+    api.sync = MagicMock()
+    api.sync.has_manifest.return_value = has_manifest
+    return api
 
 
 class TestListProjects:
@@ -24,32 +37,23 @@ class TestListProjects:
 
     @staticmethod
     def test_empty() -> None:
-        """No cached directories returns empty list."""
-        api = MagicMock()
-        api.cache.list_directories.return_value = []
-        assert list_projects(api) == []
+        """No registered directories returns empty list."""
+        assert list_projects(_api()) == []
 
     @staticmethod
-    def test_returns_project_info() -> None:
-        """Each directory result maps to a ProjectInfo."""
-        api = MagicMock()
-        api.cache.list_directories.return_value = [
-            _make_dir_result('/a/foo', exists=True, has_manifest=True),
-            _make_dir_result('/b/bar', exists=False, has_manifest=False),
+    def test_returns_project_info(tmp_path: Path) -> None:
+        """Each registered directory maps to a ProjectInfo."""
+        existing = tmp_path / 'foo'
+        existing.mkdir()
+        missing = tmp_path / 'bar'
+        save_user_config(UserConfig(projects=[str(existing), str(missing)]))
+
+        result = list_projects(_api(has_manifest=True))
+
+        assert result == [
+            ProjectInfo(path=str(existing), name='foo', exists=True, has_manifest=True),
+            ProjectInfo(path=str(missing), name='bar', exists=False, has_manifest=False),
         ]
-        result = list_projects(api)
-        expected_count = 2
-        assert len(result) == expected_count
-        assert result[0] == ProjectInfo(path='/a/foo', name='foo', exists=True, has_manifest=True)
-        assert result[1] == ProjectInfo(path='/b/bar', name='bar', exists=False, has_manifest=False)
-
-    @staticmethod
-    def test_passes_validation_flags() -> None:
-        """list_projects passes validate=True, check_manifest=True."""
-        api = MagicMock()
-        api.cache.list_directories.return_value = []
-        list_projects(api)
-        api.cache.list_directories.assert_called_once_with(validate=True, check_manifest=True)
 
 
 class TestAddProject:
@@ -58,28 +62,60 @@ class TestAddProject:
     @staticmethod
     def test_not_a_directory(tmp_path: Path) -> None:
         """Raises NotADirectoryError for a missing directory."""
-        api = MagicMock()
         with pytest.raises(NotADirectoryError, match='Not a directory'):
-            add_project(api, tmp_path / 'nonexistent')
+            add_project(_api(), tmp_path / 'nonexistent')
 
     @staticmethod
     def test_adds_and_returns_info(tmp_path: Path) -> None:
-        """Adds the directory and returns ProjectInfo."""
-        api = MagicMock()
-        api.cache.list_directories.return_value = [
-            _make_dir_result(str(tmp_path), exists=True, has_manifest=False),
-        ]
-        info = add_project(api, tmp_path)
-        api.cache.add_directory.assert_called_once_with(tmp_path)
-        assert info.path == str(tmp_path)
+        """Adds the directory to the registry and returns ProjectInfo."""
+        info = add_project(_api(), tmp_path)
+
+        assert info.path == str(tmp_path.resolve())
+        assert load_user_config().projects == [str(tmp_path.resolve())]
+
+    @staticmethod
+    def test_duplicate_raises(tmp_path: Path) -> None:
+        """Adding the same directory twice raises ValueError."""
+        add_project(_api(), tmp_path)
+        with pytest.raises(ValueError, match='already registered'):
+            add_project(_api(), tmp_path)
 
 
 class TestRemoveProject:
     """Tests for remove_project()."""
 
     @staticmethod
-    def test_delegates_to_cache() -> None:
-        """remove_project calls porringer.cache.remove_directory."""
-        api = MagicMock()
-        remove_project(api, '/tmp/foo')
-        api.cache.remove_directory.assert_called_once_with(Path('/tmp/foo'))
+    def test_removes_from_registry(tmp_path: Path) -> None:
+        """remove_project drops the directory from the registry."""
+        add_project(_api(), tmp_path)
+        remove_project(_api(), tmp_path.resolve())
+        assert load_user_config().projects == []
+
+
+class TestImportLegacyProjects:
+    """Tests for the one-time import from Porringer's old directory cache."""
+
+    @staticmethod
+    def test_imports_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Paths are imported when projects is unset, then never again."""
+        legacy = tmp_path / 'directories.json'
+        legacy.write_text(json.dumps({'version': '1', 'directories': [{'path': 'C:/a'}, {'path': 'C:/a'}]}))
+        monkeypatch.setattr('spurtle.resolution._legacy_projects_file', lambda: legacy)
+
+        import_legacy_projects()
+        assert load_user_config().projects == ['C:/a']
+
+        legacy.write_text(json.dumps({'directories': [{'path': 'C:/b'}]}))
+        import_legacy_projects()
+        assert load_user_config().projects == ['C:/a']
+
+    @staticmethod
+    def test_missing_or_corrupt_file_marks_done(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A missing or corrupt legacy file results in an empty, saved registry."""
+        legacy = tmp_path / 'directories.json'
+        legacy.write_text('{not json')
+        monkeypatch.setattr('spurtle.resolution._legacy_projects_file', lambda: legacy)
+
+        import_legacy_projects()
+
+        assert load_user_config().projects == []

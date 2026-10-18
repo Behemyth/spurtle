@@ -60,18 +60,18 @@ class DebugHandler:
 
     def handle(self, command: str) -> str:
         """Dispatch a debug command and return a JSON response string."""
-        logger.debug('Debug command received: %s', command)
+        logger.debug("Debug command received: %s", command)
 
-        if command == 'state':
+        if command == "state":
             return self._handle_state()
-        if command == 'actions':
+        if command == "actions":
             return self._handle_actions()
-        if command.startswith('action:'):
-            remainder = command[len('action:') :]
-            name, _, arg = remainder.partition(':')
+        if command.startswith("action:"):
+            remainder = command[len("action:") :]
+            name, _, arg = remainder.partition(":")
             return self._handle_action(name, arg or None)
 
-        return json.dumps({'error': f'unknown command: {command}'})
+        return json.dumps({"error": f"unknown command: {command}"})
 
     def _handle_state(self) -> str:
         """Serialise current application domain state."""
@@ -83,27 +83,26 @@ class DebugHandler:
         data_stale = coordinator.is_stale if coordinator is not None else None
 
         state = {
-            'app': {
-                'version': str(self._s.client.version),
-                'dev_mode': is_dev_mode(),
-                'frozen': getattr(sys, 'frozen', False),
-                'platform': sys.platform,
+            "app": {
+                "version": str(self._s.client.version),
+                "dev_mode": is_dev_mode(),
+                "frozen": getattr(sys, "frozen", False),
+                "platform": sys.platform,
             },
-            'config': dataclasses.asdict(config),
-            'update': {
-                'phase': model.phase.name,
-                'version': model.version,
-                'error_message': model.error_message,
+            "config": dataclasses.asdict(config),
+            "update": {
+                "phase": model.phase.name,
+                "version": model.version,
+                "error_message": model.error_message,
             },
-            'data': {
-                'plugin_count': len(snapshot.plugins) if snapshot else 0,
-                'directory_count': len(snapshot.directories) if snapshot else 0,
-                'manager_count': len(snapshot.plugin_managers) if snapshot else 0,
-                'stale': data_stale,
+            "data": {
+                "plugin_count": len(snapshot.plugins) if snapshot else 0,
+                "directory_count": len(snapshot.directories) if snapshot else 0,
+                "stale": data_stale,
             },
-            'windows': {
-                'main_visible': self._s.main_window.isVisible(),
-                'settings_visible': self._s.settings_window.isVisible(),
+            "windows": {
+                "main_visible": self._s.main_window.isVisible(),
+                "settings_visible": self._s.settings_window.isVisible(),
             },
         }
         return json.dumps(state, default=str)
@@ -111,43 +110,45 @@ class DebugHandler:
     @staticmethod
     def _handle_actions() -> str:
         """Return a list of available action names with descriptions."""
-        return json.dumps({'actions': _ACTIONS})
+        return json.dumps({"actions": _ACTIONS})
 
     def _handle_action(self, name: str, arg: str | None = None) -> str:
         """Dispatch a named action to the appropriate controller."""
         if name not in _ACTIONS:
-            return json.dumps({'error': f'unknown action: {name}', 'available': list(_ACTIONS)})
+            return json.dumps(
+                {"error": f"unknown action: {name}", "available": list(_ACTIONS)}
+            )
 
         # Actions that return their own JSON response
         _project_dispatch: dict[str, Callable[[str | None], str]] = {
-            'list_projects': lambda _: self._handle_list_projects(),
-            'add_project': self._handle_add_project,
-            'remove_project': self._handle_remove_project,
-            'project_status': self._handle_project_status,
-            'select_project': self._handle_select_project,
+            "list_projects": lambda _: self._handle_list_projects(),
+            "add_project": self._handle_add_project,
+            "remove_project": self._handle_remove_project,
+            "project_status": self._handle_project_status,
+            "select_project": self._handle_select_project,
         }
 
         if name in _project_dispatch:
             return _project_dispatch[name](arg)
 
         # Fire-and-forget actions
-        if name == 'check_update':
+        if name == "check_update":
             self._s.update_controller.check_now(silent=False)
-        elif name == 'tool_update':
+        elif name == "tool_update":
             self._s.tool_orchestrator.on_tool_update()
-        elif name == 'refresh_data':
+        elif name == "refresh_data":
             if self._s.coordinator is not None:
                 self._s.coordinator.invalidate()
-        elif name == 'show_main':
+        elif name == "show_main":
             self._s.main_window.show()
             self._s.main_window.raise_()
             self._s.main_window.activateWindow()
-        elif name == 'show_settings':
+        elif name == "show_settings":
             self._s.settings_window.show()
-        elif name == 'apply_update':
+        elif name == "apply_update":
             self._s.update_controller.request_apply()
 
-        return json.dumps({'ok': True, 'action': name})
+        return json.dumps({"ok": True, "action": name})
 
     # -- Project management actions ----------------------------------------
 
@@ -155,15 +156,15 @@ class DebugHandler:
         """List all cached project directories with validation status."""
         from spurtle.operations.project import run_project_action
 
-        return json.dumps(run_project_action('list_projects', None, self._s.porringer))
+        return json.dumps(run_project_action("list_projects", None, self._s.porringer))
 
     def _handle_add_project(self, arg: str | None) -> str:
         """Add a directory to the porringer cache."""
         from spurtle.operations.project import run_project_action
 
-        result = run_project_action('add_project', arg, self._s.porringer)
+        result = run_project_action("add_project", arg, self._s.porringer)
 
-        if 'error' not in result:
+        if "error" not in result:
             if self._s.coordinator is not None:
                 self._s.coordinator.invalidate()
             projects_view = self._s.main_window._projects_view
@@ -176,9 +177,9 @@ class DebugHandler:
         """Remove a directory from the porringer cache."""
         from spurtle.operations.project import run_project_action
 
-        result = run_project_action('remove_project', arg, self._s.porringer)
+        result = run_project_action("remove_project", arg, self._s.porringer)
 
-        if 'error' not in result:
+        if "error" not in result:
             if self._s.coordinator is not None:
                 self._s.coordinator.invalidate()
             projects_view = self._s.main_window._projects_view
@@ -191,62 +192,78 @@ class DebugHandler:
         """Dump per-action preview status for a project."""
         projects_view = self._s.main_window._projects_view
         if projects_view is None:
-            return json.dumps({'error': 'projects view not initialised — run show_main first'})
+            return json.dumps(
+                {"error": "projects view not initialised — run show_main first"}
+            )
 
         if arg:
             target = str(Path(arg).resolve())
         else:
             target = projects_view._sidebar.selected_key
             if target is None:
-                return json.dumps({'error': 'no project selected and no path argument provided'})
+                return json.dumps(
+                    {"error": "no project selected and no path argument provided"}
+                )
 
         widget = projects_view._widgets.get(target)
         if widget is None:
             available = [str(p) for p in projects_view._widgets]
-            return json.dumps({'error': f'no widget for path: {target}', 'available_paths': available})
+            return json.dumps(
+                {"error": f"no widget for path: {target}", "available_paths": available}
+            )
 
         model = widget.model
         actions = []
         for state in model.action_states:
             act = state.action
             entry: dict[str, object] = {
-                'description': act.description,
-                'kind': act.kind.name if act.kind else None,
-                'status': state.status,
+                "description": act.description,
+                "kind": act.kind.name if act.kind else None,
+                "status": state.status,
             }
             if act.package is not None:
-                entry['package'] = act.package.name
+                entry["package"] = act.package.name
                 if act.package.constraint:
-                    entry['constraint'] = act.package.constraint
+                    entry["constraint"] = act.package.constraint
             if act.installer:
-                entry['installer'] = act.installer
+                entry["installer"] = act.installer
             actions.append(entry)
 
         from spurtle.operations.schema import classify_status
 
-        needed = sum(1 for s in model.action_states if classify_status(s.status) == 'needed')
-        satisfied = sum(1 for s in model.action_states if classify_status(s.status) == 'satisfied')
-        pending = sum(1 for s in model.action_states if classify_status(s.status) == 'pending')
-        upgradable = sum(1 for s in model.action_states if s.status == 'Update available')
+        needed = sum(
+            1 for s in model.action_states if classify_status(s.status) == "needed"
+        )
+        satisfied = sum(
+            1 for s in model.action_states if classify_status(s.status) == "satisfied"
+        )
+        pending = sum(
+            1 for s in model.action_states if classify_status(s.status) == "pending"
+        )
+        upgradable = sum(
+            1 for s in model.action_states if s.status == "Update available"
+        )
 
-        return json.dumps({
-            'path': str(target),
-            'phase': model.phase.name,
-            'action_count': len(model.action_states),
-            'checked_count': model.checked_count,
-            'actions': actions,
-            'summary': {
-                'needed': needed,
-                'satisfied': satisfied,
-                'pending': pending,
-                'upgradable': upgradable,
-            },
-        })
+        return json.dumps(
+            {
+                "path": str(target),
+                "phase": model.phase.name,
+                "action_count": len(model.action_states),
+                "checked_count": model.checked_count,
+                "actions": actions,
+                "summary": {
+                    "needed": needed,
+                    "satisfied": satisfied,
+                    "pending": pending,
+                    "upgradable": upgradable,
+                },
+            }
+        )
 
     def _handle_select_project(self, arg: str | None) -> str:
         """Select a project in the sidebar."""
         if not arg:
-            return json.dumps({'error': 'select_project requires a path argument'})
+            return json.dumps({"error": "select_project requires a path argument"})
 
         self._s.main_window._navigate_to_project(arg)
-        return json.dumps({'ok': True, 'action': 'select_project', 'path': arg})
+        return json.dumps({"ok": True, "action": "select_project", "path": arg})

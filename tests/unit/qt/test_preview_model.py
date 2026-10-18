@@ -21,15 +21,15 @@ class TestActionState:
         """Defaults should be sensible for a freshly-created state."""
         act = make_action()
         state = ActionState(action=act)
-        assert state.status == 'Checking\u2026'
+        assert state.status == "Checking\u2026"
         assert state.log_lines == []
 
     @staticmethod
     def test_log_lines_are_independent() -> None:
         """Each ActionState should have its own independent log list."""
         a = ActionState(action=make_action())
-        b = ActionState(action=make_action(package='ruff'))
-        a.log_lines.append(('hello', None))
+        b = ActionState(action=make_action(package="ruff"))
+        a.log_lines.append(("hello", None))
         assert b.log_lines == []
 
 
@@ -59,17 +59,15 @@ class TestPreviewModel:
         model = PreviewModel()
         model.phase = PreviewPhase.READY
         state = ActionState(action=make_action())
-        state.status = 'Needed'
+        state.status = "Needed"
         model.action_states.append(state)
         model.install_plan = InstallPlan(
             install_indices=(0,),
             satisfied_indices=(),
             upgradable_indices=(),
-            post_sync_indices=(),
             strategy=SyncStrategy.MINIMAL,
             install_enabled=True,
-            has_post_sync=False,
-            summary='1 action(s): 1 needed.',
+            summary="1 action(s): 1 needed.",
         )
         assert model.install_enabled is True
 
@@ -82,17 +80,15 @@ class TestPreviewModel:
         model = PreviewModel()
         model.phase = PreviewPhase.READY
         state = ActionState(action=make_action())
-        state.status = 'Update available'
+        state.status = "Update available"
         model.action_states.append(state)
         model.install_plan = InstallPlan(
             install_indices=(),
             satisfied_indices=(),
             upgradable_indices=(0,),
-            post_sync_indices=(),
             strategy=SyncStrategy.MINIMAL,
             install_enabled=False,
-            has_post_sync=False,
-            summary='1 action(s): 1 upgradable (manage in Tools).',
+            summary="1 action(s): 1 upgradable (manage in Tools).",
         )
         assert model.install_enabled is False
 
@@ -102,30 +98,9 @@ class TestPreviewModel:
         model = PreviewModel()
         model.phase = PreviewPhase.READY
         state = ActionState(action=make_action())
-        state.status = 'Already installed'
+        state.status = "Already installed"
         model.action_states.append(state)
         assert model.install_enabled is False
-
-    @staticmethod
-    def test_has_post_sync_for_command_actions() -> None:
-        """Command actions (kind=None) are tracked as post-sync."""
-        model = PreviewModel()
-        model.phase = PreviewPhase.READY
-        state = ActionState(action=make_action(kind=None, description='Run setup'))
-        state.status = 'Pending'
-        model.action_states.append(state)
-        model.install_plan = InstallPlan(
-            install_indices=(),
-            satisfied_indices=(),
-            upgradable_indices=(),
-            post_sync_indices=(0,),
-            strategy=SyncStrategy.MINIMAL,
-            install_enabled=False,
-            has_post_sync=True,
-            summary='1 action(s): 1 pending.',
-        )
-        assert model.install_enabled is False
-        assert model.has_post_sync is True
 
     @staticmethod
     def test_install_enabled_false_when_installing() -> None:
@@ -133,7 +108,7 @@ class TestPreviewModel:
         model = PreviewModel()
         model.phase = PreviewPhase.INSTALLING
         state = ActionState(action=make_action())
-        state.status = 'Needed'
+        state.status = "Needed"
         model.action_states.append(state)
         assert model.install_enabled is False
 
@@ -142,22 +117,20 @@ class TestPreviewModel:
         """Install plan correctly partitions actions."""
         model = PreviewModel()
         model.phase = PreviewPhase.READY
-        needed = ActionState(action=make_action(package='a'))
-        needed.status = 'Needed'
-        satisfied = ActionState(action=make_action(package='b'))
-        satisfied.status = 'Already installed'
-        upgradable = ActionState(action=make_action(package='c'))
-        upgradable.status = 'Update available'
+        needed = ActionState(action=make_action(package="a"))
+        needed.status = "Needed"
+        satisfied = ActionState(action=make_action(package="b"))
+        satisfied.status = "Already installed"
+        upgradable = ActionState(action=make_action(package="c"))
+        upgradable.status = "Update available"
         model.action_states = [needed, satisfied, upgradable]
         model.install_plan = InstallPlan(
             install_indices=(0,),
             satisfied_indices=(1,),
             upgradable_indices=(2,),
-            post_sync_indices=(),
             strategy=SyncStrategy.MINIMAL,
             install_enabled=True,
-            has_post_sync=False,
-            summary='3 action(s): 1 needed, 1 upgradable (manage in Tools), 1 already satisfied.',
+            summary="3 action(s): 1 needed, 1 upgradable (manage in Tools), 1 already satisfied.",
         )
         assert model.install_enabled is True
         assert model.install_plan.install_indices == (0,)
@@ -168,7 +141,7 @@ class TestPreviewModel:
     def test_action_state_for_found() -> None:
         """action_state_for should find a state by matching action key."""
         model = PreviewModel()
-        act = make_action(package='ruff')
+        act = make_action(package="ruff")
         state = ActionState(action=act)
         model.action_states.append(state)
         found = model.action_state_for(act)
@@ -178,25 +151,27 @@ class TestPreviewModel:
     def test_action_state_for_not_found() -> None:
         """action_state_for should return None for unknown actions."""
         model = PreviewModel()
-        act = make_action(package='ruff')
+        act = make_action(package="ruff")
         assert model.action_state_for(act) is None
 
     @staticmethod
     def test_has_same_manifest_match() -> None:
         """has_same_manifest should return True for matching keys."""
         model = PreviewModel()
-        model.manifest_key = normalize_manifest_key('https://example.com/porringer.json')
-        assert model.has_same_manifest('https://example.com/porringer.json') is True
+        model.manifest_key = normalize_manifest_key(
+            "https://example.com/porringer.json"
+        )
+        assert model.has_same_manifest("https://example.com/porringer.json") is True
 
     @staticmethod
     def test_has_same_manifest_mismatch() -> None:
         """has_same_manifest should return False for different keys."""
         model = PreviewModel()
-        model.manifest_key = normalize_manifest_key('https://example.com/a.json')
-        assert model.has_same_manifest('https://example.com/b.json') is False
+        model.manifest_key = normalize_manifest_key("https://example.com/a.json")
+        assert model.has_same_manifest("https://example.com/b.json") is False
 
     @staticmethod
     def test_has_same_manifest_when_empty() -> None:
         """has_same_manifest should return False when no manifest loaded."""
         model = PreviewModel()
-        assert model.has_same_manifest('https://example.com/porringer.json') is False
+        assert model.has_same_manifest("https://example.com/porringer.json") is False
